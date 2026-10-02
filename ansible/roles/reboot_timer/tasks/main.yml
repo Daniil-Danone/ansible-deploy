@@ -1,0 +1,69 @@
+---
+- name: Install conditional reboot service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/deploy-reboot-if-required.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Reboot only when Ubuntu reports it is required
+      ConditionPathExists=/var/run/reboot-required
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/systemctl reboot
+  when: reboot_enabled
+  register: reboot_service
+
+- name: Install Moscow-time reboot timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/deploy-reboot-if-required.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Check for required reboot at {{ reboot_time }} {{ reboot_timezone }}
+      [Timer]
+      OnCalendar=*-*-* {{ reboot_time }}:00 {{ reboot_timezone }}
+      Persistent=false
+      [Install]
+      WantedBy=timers.target
+  when: reboot_enabled
+  register: reboot_timer
+
+- name: Enable conditional reboot timer
+  ansible.builtin.systemd_service:
+    name: deploy-reboot-if-required.timer
+    enabled: true
+    state: started
+    daemon_reload: "{{ reboot_service.changed or reboot_timer.changed }}"
+  when: reboot_enabled
+
+- name: Detect managed reboot timer
+  ansible.builtin.stat:
+    path: /etc/systemd/system/deploy-reboot-if-required.timer
+  register: managed_reboot_timer
+  when: not reboot_enabled
+
+- name: Stop and disable managed reboot timer
+  ansible.builtin.systemd_service:
+    name: deploy-reboot-if-required.timer
+    enabled: false
+    state: stopped
+  when: not reboot_enabled and managed_reboot_timer.stat.exists
+
+- name: Remove disabled reboot units
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}"
+    state: absent
+  loop:
+    - deploy-reboot-if-required.service
+    - deploy-reboot-if-required.timer
+  register: removed_reboot_units
+  when: not reboot_enabled
+
+- name: Reload systemd after removing reboot units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not reboot_enabled and removed_reboot_units.changed

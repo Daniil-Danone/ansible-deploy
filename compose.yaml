@@ -1,0 +1,10 @@
+services:
+  ansible:
+    build:
+      context: .
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:ro
+      - ${SSH_DIR:?Set SSH_DIR to the directory containing the deployment key}:/root/.ssh:ro
+    environment:
+      ANSIBLE_CONFIG: /workspace/ansible/ansible.cfg

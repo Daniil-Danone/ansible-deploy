@@ -1,0 +1,27 @@
+---
+name: Checks
+on:
+  pull_request:
+  push:
+    branches: [develop]
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    env:
+      ANSIBLE_ROLES_PATH: ansible/roles
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]' ansible-core==2.18.6 ansible-lint==25.4.0 yamllint==1.37.1
+      - run: ansible-galaxy collection install -r ansible/requirements.yml
+      - run: python -m pytest
+      - run: python -m ruff check .
+      - run: python -m mypy
+      - run: yamllint .
+      - run: ansible-lint ansible
+      - run: make syntax-check
+      - run: docker build -t ansible-deploy:ci .

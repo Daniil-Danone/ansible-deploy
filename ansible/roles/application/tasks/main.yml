@@ -1,0 +1,58 @@
+---
+- name: Create application directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0750"
+
+- name: Deliver Compose definition
+  ansible.builtin.copy:
+    src: "{{ app_compose_file }}"
+    dest: "{{ app_dir }}/compose.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  register: compose_definition
+
+- name: Deliver fixture reverse proxy config
+  ansible.builtin.copy:
+    src: "{{ app_fixture_config }}"
+    dest: "{{ app_dir }}/fixture-nginx.conf"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0644"
+  register: fixture_config
+
+- name: Deliver application environment securely
+  ansible.builtin.copy:
+    src: "{{ app_env_file }}"
+    dest: "{{ app_dir }}/.env"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  no_log: true
+  register: application_environment
+
+- name: Reconcile application services
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}"
+    files: [compose.yml]
+    env_files: [.env]
+    pull: always
+    state: present
+    remove_orphans: true
+  become_user: "{{ deploy_user }}"
+  become: true
+  no_log: true
+
+- name: Wait for loopback-only fixture health endpoint
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8080/health
+    status_code: 200
+  register: fixture_health
+  retries: 12
+  delay: 5
+  until: fixture_health.status == 200
+  when: not ansible_check_mode

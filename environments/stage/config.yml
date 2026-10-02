@@ -1,0 +1,21 @@
+---
+schema_version: 1
+environment: stage
+server:
+  host: 192.0.2.10
+  ssh_port: 22
+  bootstrap_user: root
+  deploy_user: deploy
+  ssh_key: ~/.ssh/deploy_ed25519
+  public_key: ~/.ssh/deploy_ed25519.pub
+  # Obtain out-of-band: ssh-keyscan <host> | ssh-keygen -lf - -E sha256
+  host_key_fingerprints:
+    - SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+application:
+  compose: environments/stage/docker-compose.yml
+  env_file: environments/stage/stage.env
+  remote_dir: /srv/myapp
+  allowed_loopback_ports: [8080]
+domain: stage.example.com
+acme_email: ops@example.com
+health_path: /health

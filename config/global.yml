@@ -1,0 +1,17 @@
+---
+schema_version: 1
+global:
+  security_updates:
+    enabled: true
+    reboot:
+      enabled: true
+      only_when_required: true
+      time: "04:00"
+      timezone: Europe/Moscow
+  hardening:
+    profile: default
+    controls:
+      ssh: true
+      firewall: true
+      fail2ban: true
+      unattended_upgrades: true

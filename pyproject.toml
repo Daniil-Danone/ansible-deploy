@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ansible-deploy"
+version = "0.1.0"
+description = "Reproducible Stage deployment CLI"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.10,<3",
+  "python-dotenv>=1.1,<2",
+  "PyYAML>=6.0.2,<7",
+  "tzdata>=2025.2; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+  "ruff>=0.9,<1",
+  "types-PyYAML>=6.0.12",
+]
+
+[project.scripts]
+deploy = "deploy_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deploy_cli"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config -q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["deploy_cli"]

@@ -1,0 +1,6 @@
+---
+all:
+  hosts:
+    target:
+      ansible_connection: local
+      ansible_host: localhost

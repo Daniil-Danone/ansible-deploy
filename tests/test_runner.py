@@ -1,5 +1,8 @@
 import base64
 import hashlib
+import os
+import runpy
+import stat
 import subprocess
 from io import StringIO
 from pathlib import Path
@@ -283,6 +286,179 @@ def test_relative_yaml_key_paths_are_absolute_for_nonbootstrap_runner_commands(
     runner.playbook("update.yml", inventory, {}, config.server.ssh_key)
     runner.playbook("rollback.yml", inventory, {}, config.server.ssh_key)
 
-    expected_mount = f"{expected_key}:/run/secrets/ssh_key:ro"
+    expected_mount = f"{expected_key}:/run/secrets-source/ssh_key:ro"
     assert ["--check" in command for command in commands] == [True, False, False]
     assert all(expected_mount in command for command in commands)
+    assert all(
+        f"{expected_key}:/run/secrets/ssh_key:ro" not in command for command in commands
+    )
+    assert all(
+        "/run/ansible-deploy-secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700"
+        in command
+        for command in commands
+    )
+    assert all(
+        command[command.index("--private-key") + 1]
+        == "/run/ansible-deploy-secrets/ssh_key"
+        for command in commands
+    )
+
+
+def test_runtime_copies_permissive_bind_mount_to_private_container_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entrypoint = runpy.run_path(
+        str(
+            Path(__file__).parents[1]
+            / "src/deploy_cli/runtime/docker-entrypoint.py"
+        )
+    )
+    source = tmp_path / "mounted-key"
+    destination = tmp_path / "container" / "ssh_key"
+    source.write_bytes(b"private-key-material\n")
+    source.chmod(0o777)
+    original_source_mode = stat.S_IMODE(source.stat().st_mode)
+    requested_open_modes: list[int] = []
+    requested_chmod_modes: list[int] = []
+    requested_fchmod_modes: list[int] = []
+    original_open = os.open
+    original_chmod = os.chmod
+    original_fchmod = getattr(os, "fchmod", None)
+
+    def tracked_open(path, flags, mode=0o777):
+        if Path(path) == destination:
+            requested_open_modes.append(mode)
+        return original_open(path, flags, mode)
+
+    def tracked_chmod(path, mode, *args, **kwargs):
+        if Path(path) == destination:
+            requested_chmod_modes.append(mode)
+        return original_chmod(path, mode, *args, **kwargs)
+
+    def tracked_fchmod(descriptor, mode):
+        requested_fchmod_modes.append(mode)
+        assert original_fchmod is not None
+        return original_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "chmod", tracked_chmod)
+    if original_fchmod is not None:
+        monkeypatch.setattr(os, "fchmod", tracked_fchmod)
+    monkeypatch.setitem(entrypoint["prepare_ssh_key"].__globals__, "SSH_KEY_SOURCE", str(source))
+    monkeypatch.setitem(
+        entrypoint["prepare_ssh_key"].__globals__,
+        "SSH_KEY_DESTINATION",
+        str(destination),
+    )
+
+    entrypoint["prepare_ssh_key"]()
+
+    assert source.read_bytes() == b"private-key-material\n"
+    assert stat.S_IMODE(source.stat().st_mode) == original_source_mode
+    assert destination.read_bytes() == source.read_bytes()
+    assert requested_open_modes == [0o600]
+    assert requested_fchmod_modes or requested_chmod_modes == [0o600]
+    if os.name != "nt":
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "key_bytes",
+    [b"", b"x" * (64 * 1024 + 1)],
+    ids=["empty", "oversized"],
+)
+def test_runtime_rejects_invalid_key_size_without_creating_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_bytes: bytes
+) -> None:
+    entrypoint = runpy.run_path(
+        str(Path(__file__).parents[1] / "src/deploy_cli/runtime/docker-entrypoint.py")
+    )
+    source = tmp_path / "mounted-key"
+    destination = tmp_path / "container" / "ssh_key"
+    source.write_bytes(key_bytes)
+    monkeypatch.setitem(entrypoint["prepare_ssh_key"].__globals__, "SSH_KEY_SOURCE", str(source))
+    monkeypatch.setitem(
+        entrypoint["prepare_ssh_key"].__globals__,
+        "SSH_KEY_DESTINATION",
+        str(destination),
+    )
+
+    with pytest.raises(SystemExit, match="invalid size"):
+        entrypoint["prepare_ssh_key"]()
+
+    assert source.read_bytes() == key_bytes
+    assert not destination.exists()
+
+
+def test_runtime_removes_partial_key_copy_after_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entrypoint = runpy.run_path(
+        str(Path(__file__).parents[1] / "src/deploy_cli/runtime/docker-entrypoint.py")
+    )
+    source = tmp_path / "mounted-key"
+    destination = tmp_path / "container" / "ssh_key"
+    source.write_bytes(b"private-key-material\n")
+    globals_ = entrypoint["prepare_ssh_key"].__globals__
+    monkeypatch.setitem(globals_, "SSH_KEY_SOURCE", str(source))
+    monkeypatch.setitem(globals_, "SSH_KEY_DESTINATION", str(destination))
+    monkeypatch.setattr(
+        globals_["shutil"],
+        "copyfileobj",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        entrypoint["prepare_ssh_key"]()
+
+    assert source.read_bytes() == b"private-key-material\n"
+    assert not destination.exists()
+
+
+def test_runtime_does_not_overwrite_or_remove_existing_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entrypoint = runpy.run_path(
+        str(Path(__file__).parents[1] / "src/deploy_cli/runtime/docker-entrypoint.py")
+    )
+    source = tmp_path / "mounted-key"
+    destination = tmp_path / "container" / "ssh_key"
+    source.write_bytes(b"private-key-material\n")
+    destination.parent.mkdir()
+    destination.write_bytes(b"existing\n")
+    monkeypatch.setitem(entrypoint["prepare_ssh_key"].__globals__, "SSH_KEY_SOURCE", str(source))
+    monkeypatch.setitem(
+        entrypoint["prepare_ssh_key"].__globals__,
+        "SSH_KEY_DESTINATION",
+        str(destination),
+    )
+
+    with pytest.raises(FileExistsError):
+        entrypoint["prepare_ssh_key"]()
+
+    assert source.read_bytes() == b"private-key-material\n"
+    assert destination.read_bytes() == b"existing\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are unavailable")
+def test_runtime_rejects_fifo_source_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entrypoint = runpy.run_path(
+        str(Path(__file__).parents[1] / "src/deploy_cli/runtime/docker-entrypoint.py")
+    )
+    source = tmp_path / "mounted-key"
+    destination = tmp_path / "container" / "ssh_key"
+    os.mkfifo(source)
+    monkeypatch.setitem(entrypoint["prepare_ssh_key"].__globals__, "SSH_KEY_SOURCE", str(source))
+    monkeypatch.setitem(
+        entrypoint["prepare_ssh_key"].__globals__,
+        "SSH_KEY_DESTINATION",
+        str(destination),
+    )
+
+    with pytest.raises(SystemExit, match="not a regular file"):
+        entrypoint["prepare_ssh_key"]()
+
+    assert source.exists()
+    assert not destination.exists()

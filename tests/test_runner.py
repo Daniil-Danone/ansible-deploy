@@ -1,9 +1,6 @@
 import base64
 import hashlib
-import shutil
 import subprocess
-import time
-import uuid
 from io import StringIO
 from pathlib import Path
 
@@ -289,59 +286,3 @@ def test_relative_yaml_key_paths_are_absolute_for_nonbootstrap_runner_commands(
     expected_mount = f"{expected_key}:/run/secrets/ssh_key:ro"
     assert ["--check" in command for command in commands] == [True, False, False]
     assert all(expected_mount in command for command in commands)
-
-
-def test_real_interrupted_runtime_leaves_no_container(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    docker = shutil.which("docker")
-    if docker is None:
-        pytest.skip("Docker CLI is unavailable")
-    available = subprocess.run(  # noqa: S603 - resolved Docker executable
-        [docker, "info"],
-        capture_output=True,
-        check=False,
-        timeout=10,
-    )
-    if available.returncode != 0:
-        pytest.skip("Docker daemon is unavailable")
-
-    container_name = f"ansible-deploy-stage-{uuid.uuid4().hex}"
-    assert _inspect_container(docker, container_name) != 0
-
-    class InterruptOnReady:
-        def __call__(self, line: str) -> str:
-            if "READY" in line:
-                raise KeyboardInterrupt
-            return line
-
-    runner = AnsibleRunner(tmp_path, InterruptOnReady())  # type: ignore[arg-type]
-    monkeypatch.setattr(runner, "_container_name", lambda: container_name)
-    started = time.monotonic()
-    with pytest.raises(KeyboardInterrupt):
-        runner._run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--entrypoint",
-                "sh",
-                "ansible-deploy:local",
-                "-c",
-                "echo READY; sleep 60",
-            ],
-            exit_code=5,
-        )
-
-    assert time.monotonic() - started < 12
-    assert _inspect_container(docker, container_name) != 0
-
-
-def _inspect_container(docker: str, container_name: str) -> int:
-    result = subprocess.run(  # noqa: S603 - fixed Docker command vector
-        [docker, "inspect", container_name],
-        capture_output=True,
-        check=False,
-        timeout=10,
-    )
-    return result.returncode

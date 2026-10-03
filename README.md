@@ -210,6 +210,7 @@ yamllint .
 ansible-lint ansible
 make syntax-check
 docker build -t ansible-deploy:local .
+make integration-test
 ```
 
 The checked-in Compose is only a `/health` fixture. Replace it and its loopback

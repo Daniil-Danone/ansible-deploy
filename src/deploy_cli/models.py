@@ -95,8 +95,11 @@ class ServerConfig(StrictModel):
 class ApplicationConfig(StrictModel):
     compose: Path
     env_file: Path
+    registry_auth_file: Path | None = None
     remote_dir: str = "/srv/myapp"
     allowed_loopback_ports: list[int] = Field(default_factory=list)
+    allowed_bind_paths: list[str] = Field(default_factory=list)
+    required_env_vars: list[str] = Field(default_factory=lambda: ["APP_ENV"])
 
     @field_validator("remote_dir")
     @classmethod
@@ -115,10 +118,33 @@ class ApplicationConfig(StrictModel):
             raise ValueError("remote_dir must be normalized and located below /srv or /opt")
         return normalized
 
+    @field_validator("registry_auth_file", mode="before")
+    @classmethod
+    def expand_optional_path(cls, value: str | None) -> Path | None:
+        return None if value is None else Path(value).expanduser()
+
+    @field_validator("required_env_vars")
+    @classmethod
+    def safe_required_env_vars(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)) or any(
+            not re.fullmatch(r"[A-Z_][A-Z0-9_]*", value) for value in values
+        ):
+            raise ValueError("required_env_vars must contain unique shell-style names")
+        return values
+
+    @field_validator("allowed_bind_paths")
+    @classmethod
+    def safe_bind_paths(cls, values: list[str]) -> list[str]:
+        for value in values:
+            path = PurePosixPath(value)
+            if not path.is_absolute() or ".." in path.parts or value != str(path):
+                raise ValueError("allowed_bind_paths must contain normalized absolute paths")
+        return values
+
 
 class EnvironmentConfig(StrictModel):
     schema_version: Literal[1]
-    environment: Literal["stage"]
+    environment: Literal["stage", "prod"]
     server: ServerConfig
     application: ApplicationConfig
     domain: str

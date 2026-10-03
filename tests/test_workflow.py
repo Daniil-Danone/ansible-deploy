@@ -2,8 +2,11 @@ import socket
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 from deploy_cli.config import load_configuration
-from deploy_cli.workflow import deploy, dns_preflight
+from deploy_cli.runner import RunnerError
+from deploy_cli.workflow import deploy, deployment_manifest, dns_preflight, write_inventory
 
 
 def test_deploy_verifies_managed_access_before_hardening(tmp_path: Path) -> None:
@@ -24,13 +27,40 @@ def test_deploy_verifies_managed_access_before_hardening(tmp_path: Path) -> None
 
     names = [call.args[0] for call in runner.playbook.call_args_list]
     assert names == [
+        "guard_environment.yml",
         "bootstrap.yml",
         "verify_deploy_access.yml",
+        "abort_release.yml",
         "site.yml",
         "health.yml",
+        "finalize_release.yml",
     ]
-    assert runner.playbook.call_args_list[1].kwargs["exit_code"] == 4
-    assert runner.playbook.call_args_list[-1].kwargs["exit_code"] == 7
+    assert runner.playbook.call_args_list[2].kwargs["exit_code"] == 4
+    assert runner.playbook.call_args_list[5].kwargs["exit_code"] == 7
+    assert runner.playbook.call_args_list[4].args[2]["app_compose_project"] == "myapp"
+
+
+def test_production_uses_separate_compose_project_name(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "prod")
+    env = tmp_path / "prod.env"
+    registry = tmp_path / "registry.json"
+    key = tmp_path / "key"
+    public_key = tmp_path / "key.pub"
+    env.write_text("APP_ENV=prod\n", encoding="utf-8")
+    registry.write_text('{"auths": {}}', encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    public_key.write_text("public", encoding="utf-8")
+    config.application.env_file = env
+    config.application.registry_auth_file = registry
+    config.server.ssh_key = key
+    config.server.public_key = public_key
+    runner = Mock()
+
+    deploy(repo, global_config, config, runner, dry_run=True)
+
+    site = next(call for call in runner.playbook.call_args_list if call.args[0] == "site.yml")
+    assert site.args[2]["app_compose_project"] == "myapp_prod"
 
 
 def test_dry_run_does_not_mutate_bootstrap_access(tmp_path: Path) -> None:
@@ -46,9 +76,11 @@ def test_dry_run_does_not_mutate_bootstrap_access(tmp_path: Path) -> None:
 
     deploy(repo, global_config, config, runner, dry_run=True)
 
-    runner.playbook.assert_called_once()
-    assert runner.playbook.call_args.args[0] == "site.yml"
-    assert runner.playbook.call_args.kwargs["check"] is True
+    assert [call.args[0] for call in runner.playbook.call_args_list] == [
+        "guard_environment.yml",
+        "site.yml",
+    ]
+    assert all(call.kwargs["check"] is True for call in runner.playbook.call_args_list)
 
 
 def test_dns_preflight_resolves_server_hostname(monkeypatch) -> None:
@@ -78,3 +110,90 @@ def test_dns_preflight_normalizes_ipv6(monkeypatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
     dns_preflight(config)
+
+
+def test_inventories_are_namespaced_by_environment(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    _, stage = load_configuration(repo, "stage")
+    _, prod = load_configuration(repo, "prod")
+
+    stage_path = write_inventory(tmp_path, stage, bootstrap=False)
+    prod_path = write_inventory(tmp_path, prod, bootstrap=False)
+
+    assert stage_path == tmp_path / ".deploy-state/stage/managed.yml"
+    assert prod_path == tmp_path / ".deploy-state/prod/managed.yml"
+
+
+def test_deployment_checksum_covers_secret_and_compose_inputs(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    _, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    env.write_text("APP_ENV=stage\nVALUE=one\n", encoding="utf-8")
+    config.application.env_file = env
+    first, images = deployment_manifest(config)
+    env.write_text("APP_ENV=stage\nVALUE=two\n", encoding="utf-8")
+    second, second_images = deployment_manifest(config)
+
+    assert first != second
+    assert images == second_images
+    assert all("@sha256:" in image for image in images)
+
+
+def test_failed_public_health_runs_abort_and_keeps_original_exit_code(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    key = tmp_path / "key"
+    public_key = tmp_path / "key.pub"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    public_key.write_text("public", encoding="utf-8")
+    config.application.env_file = env
+    config.server.ssh_key = key
+    config.server.public_key = public_key
+    runner = Mock()
+
+    def playbook(name, *args, **kwargs):
+        if name == "health.yml":
+            raise RunnerError("public health failed", 7)
+
+    runner.playbook.side_effect = playbook
+
+    with pytest.raises(RunnerError) as raised:
+        deploy(repo, global_config, config, runner, dry_run=False)
+
+    assert raised.value.exit_code == 7
+    names = [call.args[0] for call in runner.playbook.call_args_list]
+    assert names[-2:] == ["health.yml", "abort_release.yml"]
+
+
+def test_recovery_failure_keeps_original_exit_code_and_reports_both(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    key = tmp_path / "key"
+    public_key = tmp_path / "key.pub"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    public_key.write_text("public", encoding="utf-8")
+    config.application.env_file = env
+    config.server.ssh_key = key
+    config.server.public_key = public_key
+    runner = Mock()
+    health_failed = False
+
+    def playbook(name, *args, **kwargs):
+        nonlocal health_failed
+        if name == "health.yml":
+            health_failed = True
+            raise RunnerError("public health failed", 7)
+        if name == "abort_release.yml" and health_failed:
+            raise RunnerError("recovery failed", 6)
+
+    runner.playbook.side_effect = playbook
+
+    with pytest.raises(RunnerError) as raised:
+        deploy(repo, global_config, config, runner, dry_run=False)
+
+    assert raised.value.exit_code == 7
+    assert "recovery also failed" in str(raised.value)

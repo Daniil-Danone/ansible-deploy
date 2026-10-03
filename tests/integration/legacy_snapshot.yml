@@ -1,0 +1,102 @@
+---
+- name: Exercise legacy snapshot and failed-candidate pointer recovery
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_dir: /tmp/ansible-deploy-legacy-snapshot-test
+    app_domain: stage.example.com
+    app_environment: stage
+    app_upstream_port: 8080
+    deploy_user: root
+    health_path: /health
+    legacy_release_checksum: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    legacy_release_id: legacy-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    legacy_release_images:
+      - example/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  tasks:
+    - name: Exercise snapshot and recovery
+      block:
+        - name: Create legacy runtime
+          ansible.builtin.file:
+            path: "{{ app_dir }}"
+            state: directory
+            mode: "0750"
+
+        - name: Create legacy Compose definition
+          ansible.builtin.copy:
+            dest: "{{ app_dir }}/compose.yml"
+            mode: "0600"
+            content: "services:\n  app:\n    image: example/app\n"
+
+        - name: Create legacy environment securely
+          ansible.builtin.copy:
+            dest: "{{ app_dir }}/.env"
+            mode: "0600"
+            content: "APP_ENV=stage\nSECRET=test-only\n"
+          no_log: true
+
+        - name: Create point-1 legacy fixture configuration
+          ansible.builtin.copy:
+            dest: "{{ app_dir }}/fixture-nginx.conf"
+            content: "server { listen 8080; }\n"
+            mode: "0600"
+
+        - name: Snapshot verified legacy runtime
+          ansible.builtin.include_role:
+            name: legacy_snapshot
+
+        - name: Inspect immutable legacy snapshot
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+          loop:
+            - "{{ app_dir }}/current"
+            - "{{ app_dir }}/releases/{{ legacy_release_id }}/compose.yml"
+            - "{{ app_dir }}/releases/{{ legacy_release_id }}/.env"
+            - "{{ app_dir }}/releases/{{ legacy_release_id }}/fixture-nginx.conf"
+          register: legacy_snapshot_state
+
+        - name: Prove legacy snapshot ownership and permissions
+          ansible.builtin.assert:
+            that:
+              - legacy_snapshot_state.results[0].stat.lnk_source == app_dir + '/releases/' + legacy_release_id
+              - legacy_snapshot_state.results[1].stat.mode == '0600'
+              - legacy_snapshot_state.results[2].stat.mode == '0600'
+              - legacy_snapshot_state.results[3].stat.mode == '0600'
+
+        - name: Model failed candidate transaction after adoption
+          ansible.builtin.set_fact:
+            release_transaction:
+              candidate: "{{ app_dir }}/releases/new"
+              final_previous: "{{ app_dir }}/releases/{{ legacy_release_id }}"
+              original_current: "{{ app_dir }}/releases/{{ legacy_release_id }}"
+              original_previous: ""
+
+        - name: Corrupt current pointer as an interrupted finalize would
+          ansible.builtin.file:
+            src: "{{ app_dir }}/releases/new"
+            dest: "{{ app_dir }}/current"
+            state: link
+            force: true
+            follow: false
+
+        - name: Restore adopted legacy release after candidate failure
+          ansible.builtin.include_role:
+            name: release_restore
+
+        - name: Inspect recovered adopted legacy current
+          ansible.builtin.stat:
+            path: "{{ app_dir }}/current"
+            follow: false
+          register: recovered_legacy_current
+
+        - name: Prove failed candidate recovery returns to legacy snapshot
+          ansible.builtin.assert:
+            that:
+              - recovered_legacy_current.stat.lnk_source == app_dir + '/releases/' + legacy_release_id
+      always:
+        - name: Remove disposable legacy runtime
+          ansible.builtin.file:
+            path: "{{ app_dir }}"
+            state: absent

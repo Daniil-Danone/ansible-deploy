@@ -19,7 +19,7 @@
 
 - name: Install HTTP bootstrap virtual host
   ansible.builtin.copy:
-    dest: /etc/nginx/sites-available/application
+    dest: "/etc/nginx/sites-available/{{ app_nginx_site }}"
     owner: root
     group: root
     mode: "0644"
@@ -29,7 +29,7 @@
           listen [::]:80;
           server_name {{ app_domain }};
           location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
-          location / { proxy_pass http://127.0.0.1:8080; }
+          location / { proxy_pass http://127.0.0.1:{{ app_upstream_port }}; }
       }
   notify:
     - Validate nginx
@@ -38,8 +38,8 @@
 
 - name: Enable application virtual host
   ansible.builtin.file:
-    src: /etc/nginx/sites-available/application
-    dest: /etc/nginx/sites-enabled/application
+    src: "/etc/nginx/sites-available/{{ app_nginx_site }}"
+    dest: "/etc/nginx/sites-enabled/{{ app_nginx_site }}"
     state: link
   notify:
     - Validate nginx
@@ -49,6 +49,15 @@
 - name: Disable default virtual host
   ansible.builtin.file:
     path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify:
+    - Validate nginx
+    - Reload nginx
+  when: not ansible_check_mode
+
+- name: Remove legacy shared application virtual host link
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/application
     state: absent
   notify:
     - Validate nginx
@@ -74,7 +83,7 @@
 
 - name: Install HTTPS virtual host
   ansible.builtin.copy:
-    dest: /etc/nginx/sites-available/application
+    dest: "/etc/nginx/sites-available/{{ app_nginx_site }}"
     owner: root
     group: root
     mode: "0644"
@@ -97,7 +106,7 @@
           add_header X-Content-Type-Options nosniff always;
           add_header X-Frame-Options DENY always;
           location / {
-              proxy_pass http://127.0.0.1:8080;
+              proxy_pass http://127.0.0.1:{{ app_upstream_port }};
               proxy_set_header Host $host;
               proxy_set_header X-Real-IP $remote_addr;
               proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

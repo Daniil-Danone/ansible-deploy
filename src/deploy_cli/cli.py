@@ -1,4 +1,6 @@
 import argparse
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -6,11 +8,15 @@ from .config import (
     ConfigurationError,
     load_configuration,
     validate_compose,
+    validate_environment_file,
     validate_local_inputs,
+    validate_production_isolation,
+    validate_registry_auth,
 )
+from .models import EnvironmentConfig, GlobalConfig
 from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
-from .workflow import deploy, dns_preflight, status, update_server
+from .workflow import deploy, dns_preflight, rollback, status, update_server
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -18,52 +24,142 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help=argparse.SUPPRESS)
     parser.add_argument("--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
-    stage = sub.add_parser("stage", help="Provision and deploy Stage")
-    stage.add_argument("--dry-run", action="store_true")
+    for environment, label in (("stage", "Stage"), ("prod", "Production")):
+        deploy_parser = sub.add_parser(environment, help=f"Provision and deploy {label}")
+        deploy_parser.add_argument("--dry-run", action="store_true")
+        deploy_parser.add_argument("--version", help="Deployment version (defaults to Git SHA)")
+        if environment == "prod":
+            deploy_parser.add_argument("--yes", action="store_true")
     status_parser = sub.add_parser("status", help="Check public environment health")
-    status_parser.add_argument("environment", choices=["stage"])
+    status_parser.add_argument("environment", choices=["stage", "prod"])
     server = sub.add_parser("server")
     server_sub = server.add_subparsers(dest="server_command", required=True)
     update = server_sub.add_parser("update", help="Reapply managed server state")
-    update.add_argument("environment", choices=["stage"])
+    update.add_argument("environment", choices=["stage", "prod", "all"])
     update.add_argument("--dry-run", action="store_true")
+    update.add_argument("--yes", action="store_true")
+    rollback_parser = sub.add_parser("rollback", help="Roll back Production application/config")
+    rollback_parser.add_argument("environment", choices=["prod"])
+    rollback_parser.add_argument("--yes", action="store_true")
     return parser
+
+
+def _deployment_version(repo: Path, supplied: str | None) -> str:
+    if supplied is not None:
+        version = supplied
+    else:
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed Git command and argument vector
+                ["git", "rev-parse", "HEAD"],  # noqa: S607 - fixed executable
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ConfigurationError(
+                "Unable to determine deployment Git SHA; use --version"
+            ) from exc
+        version = result.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", version):
+        raise ConfigurationError("Deployment version must be a 7-40 character lowercase Git SHA")
+    return version
+
+
+def _confirm_production(config_environment: str, host: str, domain: str, *, yes: bool) -> None:
+    if yes:
+        return
+    if not sys.stdin.isatty():
+        raise ConfigurationError("Production operation requires an interactive terminal or --yes")
+    print(f"Production target: environment={config_environment}, host={host}, domain={domain}")
+    if input("Type 'prod' to continue: ").strip() != "prod":
+        raise ConfigurationError("Production operation was not confirmed")
+
+
+def _load_and_validate(
+    repo: Path, environment: str, command: str
+) -> tuple[GlobalConfig, EnvironmentConfig]:
+    global_config, config = load_configuration(repo, environment)
+    if environment == "prod":
+        validate_production_isolation(repo, config)
+    if command == "status":
+        validate_local_inputs(
+            config, require_ssh=False, require_public_key=False, require_application=False
+        )
+    elif command in {"server", "rollback"}:
+        validate_local_inputs(config, require_public_key=False, require_application=False)
+    else:
+        validate_local_inputs(config)
+        validate_compose(config)
+        validate_environment_file(config)
+        validate_registry_auth(config)
+    return global_config, config
 
 
 def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     repo = args.repo.resolve()
-    environment = getattr(args, "environment", "stage")
     try:
-        global_config, config = load_configuration(repo, environment)
-        if args.command == "status":
-            validate_local_inputs(
-                config,
-                require_ssh=False,
-                require_public_key=False,
-                require_application=False,
+        environment = args.command if args.command in {"stage", "prod"} else args.environment
+        environments = ["stage", "prod"] if environment == "all" else [environment]
+        loaded = [_load_and_validate(repo, name, args.command) for name in environments]
+        is_dry_run = getattr(args, "dry_run", False)
+        if (
+            any(name == "prod" for name in environments)
+            and args.command != "status"
+            and not is_dry_run
+        ):
+            prod_config = loaded[environments.index("prod")][1]
+            _confirm_production(
+                prod_config.environment,
+                prod_config.server.host,
+                prod_config.domain,
+                yes=args.yes,
             )
-        elif args.command == "server":
-            validate_local_inputs(config, require_public_key=False, require_application=False)
-        else:
-            validate_local_inputs(config)
-            validate_compose(config)
-        secret_values: set[str] = set()
-        if config.application.env_file.is_file():
-            env_text = config.application.env_file.read_text(encoding="utf-8")
-            secret_values = secrets_from_env(env_text)
-        redactor = Redactor(secret_values | {str(config.server.ssh_key)})
-        runner = AnsibleRunner(repo, redactor, verbose=args.verbose)
-        if args.command == "status":
-            status(config)
-            print(f"[OK] https://{config.domain}{config.health_path} is healthy")
-        elif args.command == "stage":
-            dns_preflight(config)
-            deploy(repo, global_config, config, runner, dry_run=args.dry_run)
-            print("[OK] Stage deployment completed")
-        else:
-            update_server(repo, global_config, config, runner, dry_run=args.dry_run)
-            print("[OK] Stage server state updated")
+
+        update_failures: list[tuple[str, RunnerError]] = []
+        for current_environment, (global_config, config) in zip(environments, loaded, strict=True):
+            secret_values: set[str] = set()
+            if config.application.env_file.is_file():
+                env_text = config.application.env_file.read_text(encoding="utf-8")
+                secret_values = secrets_from_env(env_text)
+            redactor = Redactor(secret_values | {str(config.server.ssh_key)})
+            runner = AnsibleRunner(
+                repo, redactor, environment=current_environment, verbose=args.verbose
+            )
+            if args.command == "status":
+                status(config)
+                print(f"[OK] https://{config.domain}{config.health_path} is healthy")
+            elif args.command in {"stage", "prod"}:
+                dns_preflight(config)
+                version = _deployment_version(repo, args.version)
+                deploy(
+                    repo,
+                    global_config,
+                    config,
+                    runner,
+                    dry_run=args.dry_run,
+                    deployment_version=version,
+                )
+                print(f"[OK] {current_environment} deployment {version} completed")
+            elif args.command == "rollback":
+                rollback(repo, global_config, config, runner)
+                print("[OK] prod rollback completed and verified")
+            else:
+                try:
+                    update_server(repo, global_config, config, runner, dry_run=args.dry_run)
+                    print(f"[OK] {current_environment} server state updated")
+                except RunnerError as exc:
+                    if environment != "all":
+                        raise
+                    update_failures.append((current_environment, exc))
+                    print(f"[ERROR] {current_environment} update failed: {exc}", file=sys.stderr)
+        if update_failures:
+            failed_names = ", ".join(name for name, _ in update_failures)
+            raise RunnerError(
+                f"server update all failed for: {failed_names}",
+                update_failures[0][1].exit_code,
+            )
         return 0
     except ConfigurationError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)

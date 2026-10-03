@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .models import EnvironmentConfig, GlobalConfig
 from .redaction import Redactor
@@ -18,9 +18,12 @@ class RunnerError(RuntimeError):
 
 
 class AnsibleRunner:
-    def __init__(self, repo: Path, redactor: Redactor, *, verbose: bool = False) -> None:
+    def __init__(
+        self, repo: Path, redactor: Redactor, *, environment: str = "stage", verbose: bool = False
+    ) -> None:
         self.repo = repo
         self.redactor = redactor
+        self.state_dir = repo / ".deploy-state" / environment
         self.verbose = verbose
 
     def build_image(self) -> None:
@@ -63,9 +66,8 @@ class AnsibleRunner:
         trusted = {line for line in scanned if _fingerprint(line) in expected_fingerprints}
         if not trusted:
             raise RunnerError("SSH host key does not match a configured SHA256 fingerprint", 3)
-        state_dir = self.repo / ".deploy-state"
-        state_dir.mkdir(mode=0o700, exist_ok=True)
-        known_hosts = state_dir / "known_hosts"
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        known_hosts = self.state_dir / "known_hosts"
         if known_hosts.exists():
             existing = {
                 line.strip()
@@ -88,6 +90,7 @@ class AnsibleRunner:
         *,
         compose_file: Path | None = None,
         env_file: Path | None = None,
+        registry_auth_file: Path | None = None,
         check: bool = False,
         exit_code: int = 5,
     ) -> None:
@@ -96,7 +99,7 @@ class AnsibleRunner:
             "run",
             "--rm",
             "-v",
-            f"{self.repo / '.deploy-state'}:/state",
+            f"{self.state_dir}:/state",
             "-v",
             f"{self.repo}:/workspace:ro",
             "-v",
@@ -118,6 +121,8 @@ class AnsibleRunner:
             args[3:3] = ["-v", f"{compose_file}:/run/config/compose.yml:ro"]
         if env_file is not None:
             args[3:3] = ["-v", f"{env_file}:/run/secrets/app_env:ro"]
+        if registry_auth_file is not None:
+            args[3:3] = ["-v", f"{registry_auth_file}:/run/secrets/registry_auth:ro"]
         if check:
             args.extend(["--check", "--diff"])
         if self.verbose:
@@ -160,7 +165,14 @@ def _fingerprint(known_host_line: str) -> str:
     return f"SHA256:{digest}"
 
 
-def ansible_vars(global_config: GlobalConfig, config: EnvironmentConfig) -> dict[str, object]:
+def ansible_vars(
+    global_config: GlobalConfig,
+    config: EnvironmentConfig,
+    *,
+    deployment_version: str = "unmanaged",
+    deployment_checksum: str = "unmanaged",
+    deployment_images: list[str] | None = None,
+) -> dict[str, object]:
     reboot = global_config.global_.security_updates.reboot
     controls = global_config.global_.hardening.controls
     public_key = ""
@@ -172,8 +184,27 @@ def ansible_vars(global_config: GlobalConfig, config: EnvironmentConfig) -> dict
         "deploy_public_key": public_key,
         "app_compose_file": "/run/config/compose.yml",
         "app_env_file": "/run/secrets/app_env",
-        "app_fixture_config": "/workspace/environments/stage/fixture-nginx.conf",
+        "app_registry_auth_file": (
+            "/run/secrets/registry_auth"
+            if config.application.registry_auth_file is not None
+            else ""
+        ),
         "app_dir": config.application.remote_dir,
+        "app_environment": config.environment,
+        "app_compose_project": (
+            PurePosixPath(config.application.remote_dir).name
+            if config.environment == "stage"
+            else "myapp_prod"
+        ),
+        "app_upstream_port": 8080,
+        "app_allowed_bind_paths": config.application.allowed_bind_paths,
+        "app_nginx_site": f"application-{config.environment}",
+        "deploy_identity_dir": "/etc/ansible-deploy",
+        "deploy_identity_file": "/etc/ansible-deploy/identity.json",
+        "deploy_legacy_identity_file": "/etc/ansible-deploy/environment",
+        "deployment_version": deployment_version,
+        "deployment_checksum": deployment_checksum,
+        "deployment_images": deployment_images or [],
         "app_domain": config.domain,
         "acme_email": config.acme_email,
         "health_path": config.health_path,

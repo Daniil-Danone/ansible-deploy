@@ -1,7 +1,12 @@
+import ipaddress
+import json
+import re
+import socket
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import dotenv_values
 from pydantic import BaseModel, ValidationError
 
 from .models import EnvironmentConfig, GlobalConfig
@@ -20,14 +25,21 @@ def _load_yaml[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
 
 
 def load_configuration(repo: Path, environment: str) -> tuple[GlobalConfig, EnvironmentConfig]:
-    if environment != "stage":
+    if environment not in {"stage", "prod"}:
         raise ConfigurationError(f"Environment is not implemented yet: {environment}")
     global_config = _load_yaml(repo / "config/global.yml", GlobalConfig)
     env_path = repo / "environments" / environment / "config.yml"
     env_config = _load_yaml(env_path, EnvironmentConfig)
+    if env_config.environment != environment:
+        raise ConfigurationError(
+            f"Configuration environment mismatch: requested {environment!r}, "
+            f"file declares {env_config.environment!r}"
+        )
     app = env_config.application
     app.compose = (repo / app.compose).resolve()
     app.env_file = (repo / app.env_file).resolve()
+    if app.registry_auth_file is not None and not app.registry_auth_file.is_absolute():
+        app.registry_auth_file = (repo / app.registry_auth_file).resolve()
     return global_config, env_config
 
 
@@ -45,6 +57,8 @@ def validate_local_inputs(
         required.append(config.server.public_key)
     if require_application:
         required.extend([config.application.compose, config.application.env_file])
+        if config.application.registry_auth_file is not None:
+            required.append(config.application.registry_auth_file)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise ConfigurationError("Required local files are missing: " + ", ".join(missing))
@@ -60,6 +74,7 @@ def validate_compose(config: EnvironmentConfig) -> None:
     if "include" in document:
         raise ConfigurationError("Compose include is forbidden; provide one self-contained file")
     networks = _validate_network_definitions(document.get("networks", {}))
+    volumes = _validate_volume_definitions(document.get("volumes", {}))
     allowed = set(config.application.allowed_loopback_ports)
     for service_name, raw_service in document["services"].items():
         if not isinstance(raw_service, dict):
@@ -71,6 +86,24 @@ def validate_compose(config: EnvironmentConfig) -> None:
                 f"Compose service {service_name!r} uses forbidden network_mode/container sharing"
             )
         _validate_service_networks(service_name, raw_service.get("networks", []), networks)
+        _validate_service_volumes(
+            service_name,
+            raw_service.get("volumes", []),
+            set(config.application.allowed_bind_paths),
+            volumes,
+        )
+        if config.environment == "prod":
+            image = raw_service.get("image")
+            if not isinstance(image, str) or not re.fullmatch(
+                r"[^\s@]+@sha256:[0-9a-f]{64}", image
+            ):
+                raise ConfigurationError(
+                    f"Production Compose service {service_name!r} must use a digest-pinned image"
+                )
+            if "build" in raw_service:
+                raise ConfigurationError(
+                    f"Production Compose service {service_name!r} cannot build on the server"
+                )
         for published in raw_service.get("ports", []):
             if _contains_interpolation(published):
                 raise ConfigurationError(
@@ -82,6 +115,75 @@ def validate_compose(config: EnvironmentConfig) -> None:
                     f"Compose service {service_name!r} publishes forbidden binding "
                     f"{host_ip}:{host_port}; only configured loopback ports are allowed"
                 )
+
+
+def validate_environment_file(config: EnvironmentConfig) -> None:
+    """Validate required keys without exposing any secret values."""
+    try:
+        values = dotenv_values(config.application.env_file)
+    except (OSError, ValueError) as exc:
+        raise ConfigurationError(f"Invalid environment file: {exc}") from exc
+    missing = [name for name in config.application.required_env_vars if not values.get(name)]
+    if missing:
+        raise ConfigurationError(
+            "Environment file is missing required variables: " + ", ".join(missing)
+        )
+    declared_environment = values.get("APP_ENV")
+    if declared_environment != config.environment:
+        raise ConfigurationError(
+            "Environment file APP_ENV does not match selected environment "
+            f"{config.environment!r}"
+        )
+
+
+def validate_registry_auth(config: EnvironmentConfig) -> None:
+    path = config.application.registry_auth_file
+    if path is None:
+        return
+    try:
+        document: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigurationError("Registry authentication file is not valid JSON") from exc
+    if not isinstance(document, dict) or not isinstance(document.get("auths"), dict):
+        raise ConfigurationError("Registry authentication file must contain an auths mapping")
+
+
+def validate_production_isolation(repo: Path, prod: EnvironmentConfig) -> None:
+    _, stage = load_configuration(repo, "stage")
+    comparisons = {
+        "server host": (prod.server.host, stage.server.host),
+        "domain": (prod.domain, stage.domain),
+        "remote runtime": (prod.application.remote_dir, stage.application.remote_dir),
+        "Compose": (prod.application.compose, stage.application.compose),
+        "env file": (prod.application.env_file, stage.application.env_file),
+    }
+    reused = [
+        label
+        for label, (prod_value, stage_value) in comparisons.items()
+        if prod_value == stage_value
+    ]
+    if reused:
+        raise ConfigurationError(
+            "Production must not reuse Stage " + ", ".join(reused)
+        )
+    if _host_addresses(prod.server.host, prod.server.ssh_port).intersection(
+        _host_addresses(stage.server.host, stage.server.ssh_port)
+    ):
+        raise ConfigurationError("Production and Stage server hosts resolve to the same address")
+
+
+def _host_addresses(host: str, port: int) -> set[str]:
+    try:
+        return {str(ipaddress.ip_address(host))}
+    except ValueError:
+        pass
+    try:
+        return {
+            str(ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]))
+            for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise ConfigurationError(f"Unable to resolve configured server host {host}") from exc
 
 
 def _published_binding(binding: object) -> tuple[str, int]:
@@ -99,6 +201,73 @@ def _published_binding(binding: object) -> tuple[str, int]:
             raise ConfigurationError(f"Unsupported Compose port definition: {binding!r}")
         return str(host_ip), int(str(published))
     raise ConfigurationError(f"Unsupported Compose port definition: {binding!r}")
+
+
+def _validate_service_volumes(
+    service_name: object,
+    raw_volumes: object,
+    allowed_bind_paths: set[str],
+    declared_volumes: set[str],
+) -> None:
+    if not isinstance(raw_volumes, list):
+        raise ConfigurationError(f"Compose service {service_name!r} volumes must be a list")
+    for volume in raw_volumes:
+        if _contains_interpolation(volume):
+            raise ConfigurationError(
+                f"Compose service {service_name!r} interpolates a volume definition"
+            )
+        if isinstance(volume, str):
+            source = volume.split(":", 1)[0]
+            if source.startswith((".", "/")):
+                if not source.startswith("/") or source not in allowed_bind_paths:
+                    raise ConfigurationError(
+                        f"Compose service {service_name!r} uses an unapproved bind mount"
+                    )
+            elif ":" in volume and source not in declared_volumes:
+                raise ConfigurationError(
+                    f"Compose service {service_name!r} references an undeclared named volume"
+                )
+        elif isinstance(volume, dict):
+            volume_type = volume.get("type", "volume")
+            if volume_type == "bind":
+                bind_source = volume.get("source")
+                if not isinstance(bind_source, str) or bind_source not in allowed_bind_paths:
+                    raise ConfigurationError(
+                        f"Compose service {service_name!r} uses an unapproved bind mount"
+                    )
+            elif volume_type != "volume":
+                raise ConfigurationError(
+                    f"Compose service {service_name!r} uses unsupported volume type"
+                )
+            else:
+                named_source = volume.get("source")
+                if named_source is not None and named_source not in declared_volumes:
+                    raise ConfigurationError(
+                        f"Compose service {service_name!r} references an undeclared named volume"
+                    )
+        else:
+            raise ConfigurationError(
+                f"Compose service {service_name!r} has an invalid volume definition"
+            )
+
+
+def _validate_volume_definitions(raw_volumes: object) -> set[str]:
+    if not isinstance(raw_volumes, dict):
+        raise ConfigurationError("Compose volumes must be a mapping")
+    volumes: set[str] = set()
+    for volume_name, definition in raw_volumes.items():
+        if not isinstance(volume_name, str) or "$" in volume_name:
+            raise ConfigurationError("Compose volume names cannot use interpolation")
+        if definition not in (None, {}):
+            if _contains_interpolation(definition):
+                raise ConfigurationError(
+                    f"Compose volume {volume_name!r} contains forbidden interpolation"
+                )
+            raise ConfigurationError(
+                f"Compose volume {volume_name!r} must be a managed named volume"
+            )
+        volumes.add(volume_name)
+    return volumes
 
 
 def _contains_interpolation(value: object) -> bool:

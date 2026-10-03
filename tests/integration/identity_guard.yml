@@ -1,0 +1,73 @@
+---
+- name: Exercise authoritative identity rejection on a disposable filesystem
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_compose_project: myapp
+    app_dir: /srv/new-runtime
+    app_domain: stage.example.com
+    app_environment: stage
+    app_nginx_site: application-stage
+    app_upstream_port: 8080
+    deploy_identity_dir: /tmp/ansible-deploy-identity-guard-test
+    deploy_identity_file: /tmp/ansible-deploy-identity-guard-test/identity.json
+    deploy_legacy_identity_file: /tmp/ansible-deploy-identity-guard-test/environment
+    health_path: /health
+  tasks:
+    - name: Exercise identity mismatch
+      block:
+        - name: Create disposable identity directory
+          ansible.builtin.file:
+            path: "{{ deploy_identity_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Persist identity owned by the old runtime
+          ansible.builtin.copy:
+            dest: "{{ deploy_identity_file }}"
+            mode: "0644"
+            content: >-
+              {{ {'compose_project': 'myapp', 'environment': 'stage',
+              'nginx_site': 'application-stage',
+              'routing': {'domain': 'stage.example.com', 'health_path': '/health',
+              'upstream_port': '8080'}, 'runtime_dir': '/srv/old-runtime'} | to_json }}
+
+        - name: Expect guard to reject a changed runtime
+          block:
+            - name: Run authoritative environment guard
+              ansible.builtin.include_role:
+                name: environment_guard
+
+            - name: Record unexpected guard acceptance
+              ansible.builtin.set_fact:
+                identity_unexpectedly_accepted: true
+          rescue:
+            - name: Record expected identity rejection
+              ansible.builtin.set_fact:
+                identity_rejection_observed: true
+
+        - name: Prove changed runtime failed before mutation
+          ansible.builtin.assert:
+            that:
+              - identity_rejection_observed | default(false)
+              - not (identity_unexpectedly_accepted | default(false))
+
+        - name: Persist exact requested identity
+          ansible.builtin.copy:
+            dest: "{{ deploy_identity_file }}"
+            mode: "0644"
+            content: >-
+              {{ {'compose_project': 'myapp', 'environment': 'stage',
+              'nginx_site': 'application-stage',
+              'routing': {'domain': 'stage.example.com', 'health_path': '/health',
+              'upstream_port': '8080'}, 'runtime_dir': '/srv/new-runtime'} | to_json }}
+
+        - name: Prove exact requested identity is accepted
+          ansible.builtin.include_role:
+            name: environment_guard
+      always:
+        - name: Remove disposable identity directory
+          ansible.builtin.file:
+            path: "{{ deploy_identity_dir }}"
+            state: absent

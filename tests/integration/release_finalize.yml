@@ -1,0 +1,96 @@
+---
+- name: Exercise release finalization against a disposable filesystem
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_dir: /tmp/ansible-deploy-release-finalize-test
+    deploy_user: root
+  tasks:
+    - name: Create disposable releases and original links
+      block:
+        - name: Create disposable release directories
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: "0750"
+          loop:
+            - "{{ app_dir }}/releases/old"
+            - "{{ app_dir }}/releases/older"
+            - "{{ app_dir }}/releases/new"
+
+        - name: Create original release links
+          ansible.builtin.file:
+            src: "{{ item.src }}"
+            dest: "{{ item.dest }}"
+            state: link
+          loop:
+            - src: "{{ app_dir }}/releases/old"
+              dest: "{{ app_dir }}/current"
+            - src: "{{ app_dir }}/releases/older"
+              dest: "{{ app_dir }}/previous"
+            - src: "{{ app_dir }}/releases/new"
+              dest: "{{ app_dir }}/candidate"
+
+        - name: Create pending transaction
+          ansible.builtin.copy:
+            dest: "{{ app_dir }}/transaction.json"
+            mode: "0600"
+            content: >-
+              {{ {'candidate': app_dir + '/releases/new',
+              'final_previous': app_dir + '/releases/old',
+              'original_current': app_dir + '/releases/old',
+              'original_previous': app_dir + '/releases/older'} | to_json }}
+
+        - name: Simulate crash that removed candidate symlink before finalize retry
+          ansible.builtin.file:
+            path: "{{ app_dir }}/candidate"
+            state: absent
+
+        - name: Finalize disposable release transaction
+          ansible.builtin.include_role:
+            name: release_finalize
+
+        - name: Inspect finalized links and transaction
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+          loop:
+            - "{{ app_dir }}/current"
+            - "{{ app_dir }}/previous"
+            - "{{ app_dir }}/transaction.json"
+          register: finalized_state
+
+        - name: Prove finalization committed only the verified candidate
+          ansible.builtin.assert:
+            that:
+              - finalized_state.results[0].stat.lnk_source == app_dir + '/releases/new'
+              - finalized_state.results[1].stat.lnk_source == app_dir + '/releases/old'
+              - not finalized_state.results[2].stat.exists
+
+        - name: Prepare first-deployment finalization with no original links
+          ansible.builtin.copy:
+            dest: "{{ app_dir }}/transaction.json"
+            mode: "0600"
+            content: >-
+              {{ {'candidate': app_dir + '/releases/new', 'original_current': '',
+              'original_previous': '', 'final_previous': ''} | to_json }}
+
+        - name: Finalize transaction with no original links
+          ansible.builtin.include_role:
+            name: release_finalize
+
+        - name: Prove absent previous link remains absent
+          ansible.builtin.stat:
+            path: "{{ app_dir }}/previous"
+            follow: false
+          register: absent_previous
+
+        - name: Require previous link to be absent
+          ansible.builtin.assert:
+            that: not absent_previous.stat.exists
+      always:
+        - name: Remove disposable release tree
+          ansible.builtin.file:
+            path: "{{ app_dir }}"
+            state: absent

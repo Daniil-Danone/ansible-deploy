@@ -1,0 +1,27 @@
+---
+- name: Reset rejection evidence for {{ legacy_case.name }}
+  ansible.builtin.set_fact:
+    legacy_case_rejected: false
+    legacy_case_unexpectedly_accepted: false
+
+- name: Exercise rejection for {{ legacy_case.name }}
+  block:
+    - name: Run legacy Compose guard for {{ legacy_case.name }}
+      ansible.builtin.include_role:
+        name: legacy_compose_guard
+      vars:
+        legacy_compose_definition: "{{ legacy_case.definition }}"
+
+    - name: Record unexpected acceptance for {{ legacy_case.name }}
+      ansible.builtin.set_fact:
+        legacy_case_unexpectedly_accepted: true
+  rescue:
+    - name: Record expected rejection for {{ legacy_case.name }}
+      ansible.builtin.set_fact:
+        legacy_case_rejected: true
+
+- name: Prove {{ legacy_case.name }} was rejected
+  ansible.builtin.assert:
+    that:
+      - legacy_case_rejected
+      - not legacy_case_unexpectedly_accepted

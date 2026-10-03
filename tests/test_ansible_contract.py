@@ -18,7 +18,7 @@ def _yaml(path: str) -> list[dict[str, object]]:
 def test_fixture_only_binds_upstream_to_loopback() -> None:
     compose = yaml.safe_load(_text("environments/stage/docker-compose.yml"))
 
-    assert compose["services"]["fixture"]["ports"] == ["127.0.0.1:8080:8080"]
+    assert compose["services"]["fixture"]["ports"] == ["127.0.0.1:8080:80"]
 
 
 def test_reboot_is_marker_conditional_and_uses_moscow_calendar() -> None:
@@ -37,12 +37,60 @@ def test_sensitive_application_files_are_delivered_as_0600() -> None:
         task
         for task in tasks
         if task.get("name")
-        in {"Deliver Compose definition", "Deliver application environment securely"}
+        in {
+            "Deliver release Compose definition",
+            "Deliver immutable release Compose definition",
+            "Deliver immutable release environment securely",
+        }
     ]
 
     assert all(task["ansible.builtin.copy"]["mode"] == "0600" for task in sensitive_copies)  # type: ignore[index]
     env_task = next(task for task in sensitive_copies if "environment" in str(task["name"]))
     assert env_task["no_log"] is True
+
+
+def test_release_metadata_and_rollback_preserve_safe_permissions_and_health() -> None:
+    application = _text("ansible/roles/application/tasks/main.yml")
+    rollback = _text("ansible/playbooks/rollback.yml")
+
+    assert "releases/{{ deployment_version }}" in application
+    guard = _text("ansible/roles/environment_guard/tasks/main.yml")
+    abort = _text("ansible/playbooks/abort_release.yml")
+    finalize = _text("ansible/roles/release_finalize/tasks/main.yml")
+    restore = _text("ansible/roles/release_restore/tasks/main.yml")
+    assert "different input checksum" in application
+    assert "check_mode: false" in application
+    assert "final_previous" in application
+    assert "Reject any change to authoritative host identity" in guard
+    assert "pull: never" in rollback
+    assert "pull: never" in abort
+    assert "original_previous" in restore
+    assert "Commit externally verified current release" in finalize
+    assert "mode: \"0600\"" in finalize
+    assert "Verify rollback public HTTPS endpoint" in rollback
+    assert "Verify recovered public HTTPS endpoint" in abort
+    assert "Restore original current-version metadata" in restore
+
+
+def test_legacy_stage_is_verified_before_secure_snapshot_and_commit() -> None:
+    adoption = _text("ansible/roles/legacy_adoption/tasks/main.yml")
+    site = _text("ansible/playbooks/site.yml")
+    snapshot = _yaml("ansible/roles/legacy_snapshot/tasks/main.yml")
+    names = [str(task.get("name")) for task in snapshot]
+
+    assert site.index("role: legacy_adoption") < site.index("role: environment_identity")
+    assert adoption.index("Validate legacy Compose portability before identity commit") < (
+        adoption.index("Wait for every legacy Compose container to become healthy")
+    )
+    assert adoption.index("Verify legacy public HTTPS endpoint before adoption") < adoption.index(
+        "Snapshot and commit verified legacy release"
+    )
+    env_task = next(task for task in snapshot if "environment securely" in str(task.get("name")))
+    assert env_task["no_log"] is True
+    assert env_task["ansible.builtin.copy"]["mode"] == "0600"  # type: ignore[index]
+    assert names.index("Persist immutable legacy release metadata") < names.index(
+        "Commit verified legacy release as current"
+    )
 
 
 def test_firewall_has_only_expected_public_ports() -> None:

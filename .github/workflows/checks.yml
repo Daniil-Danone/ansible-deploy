@@ -25,3 +25,4 @@ jobs:
       - run: ansible-lint ansible
       - run: make syntax-check
       - run: docker build -t ansible-deploy:ci .
+      - run: docker tag ansible-deploy:ci ansible-deploy:local && make integration-test

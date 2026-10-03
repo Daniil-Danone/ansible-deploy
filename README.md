@@ -1,40 +1,89 @@
 # ansible-deploy
 
-`ansible-deploy` is an installable CLI that provisions Ubuntu 24.04 servers and
-deploys Docker Compose applications behind Nginx and Let's Encrypt. The application
-project owns `.deploy/`, Compose and secret env files; the CLI wheel owns the pinned
-Ansible runtime. A checkout of this repository is not needed to deploy an application.
+`ansible-deploy` — CLI для воспроизводимого развёртывания Docker Compose-приложений
+на выделенном Ubuntu 24.04 сервере. Проект хранит `.deploy/`, Compose и секретные
+env-файлы, а устанавливаемый Python-пакет приносит фиксированный Ansible runtime.
 
-```powershell
-cd C:\Code\MyRepos\my-app
-python -m pip install "ansible-deploy @ git+https://github.com/Daniil-Danone/ansible-deploy.git@develop"
-deploy stage --ask-bootstrap-password
-deploy status stage
+CLI локально собирает и публикует образы в GHCR или Docker Hub, закрепляет их по
+digest, подготавливает сервер, включает HTTPS и запускает приложение. Исходный код
+на VPS не копируется и там не собирается.
+
+## С чего начать
+
+Выберите свою рабочую систему. Каждая инструкция автономна: от установки инструментов
+до первого HTTPS-ответа demo-приложения.
+
+- [Windows](docs/getting-started/windows.md)
+- [macOS](docs/getting-started/macos.md)
+- [Ubuntu](docs/getting-started/ubuntu.md)
+
+## Возможности
+
+- первичная настройка чистого Ubuntu 24.04 по root-паролю;
+- автоматическое создание отдельного Ed25519-ключа и пользователя `deploy`;
+- Docker, Nginx, Certbot, UFW, Fail2ban и unattended upgrades;
+- сборка и публикация нескольких образов в GHCR или Docker Hub;
+- приватные registry с отдельным read-only токеном сервера;
+- digest-pinned Production, проверка DNS/SSH host key/Compose/env;
+- обновление управляемого состояния сервера и откат приложения Production.
+
+## Поддерживаемая матрица
+
+| Часть | Поддерживается |
+|---|---|
+| Рабочая машина | Windows, macOS, Ubuntu; Python 3.12+, Git, Docker, OpenSSH |
+| Целевой сервер | отдельный чистый Ubuntu 24.04 VPS |
+| Registry | private/public GHCR и Docker Hub |
+| Окружения | Stage и изолированный Production |
+| Application | один Compose-проект, один домен, upstream `127.0.0.1:8080` |
+
+## Границы проекта
+
+CLI рассчитан на один домен, один сервер и один upstream `127.0.0.1:8080`. Он не
+автоматизирует DNS и firewall провайдера, secrets manager, миграции и backup базы,
+multi-host/rolling/zero-downtime deploy, очистку старых релизов и образов. Rollback
+не откатывает базу данных.
+
+> UFW может сбросить существующие правила. Используйте отдельный чистый сервер, а не
+> VPS с другими приложениями. Поддерживаемая и проверенная цель — Ubuntu 24.04;
+> дистрибутив пока не определяется автоматически.
+
+## Жизненный цикл
+
+```text
+локальный Git commit
+  -> build и push images
+  -> проверка immutable digest
+  -> обновление Compose
+  -> проверка DNS и SSH host key
+  -> bootstrap root (только первый раз)
+  -> deploy-пользователь + Docker/Nginx/TLS
+  -> HTTPS health check
 ```
 
-Build, push and pin application images from `.deploy/images.yml`:
+## Документация
 
-```powershell
-deploy images publish stage --registry ghcr --namespace OWNER --username OWNER --ask-token --ask-pull-token
+- [Карта документации](docs/README.md)
+- Практика: [demo-app](docs/guides/demo-app.md),
+  [настоящий проект](docs/guides/real-project.md),
+  [приватные registry](docs/guides/private-registries.md),
+  [Production](docs/guides/production.md)
+- Концепции: [как всё работает](docs/concepts/how-it-works.md),
+  [SSH и ключи](docs/concepts/ssh-and-keys.md),
+  [состояние сервера](docs/concepts/server-state.md)
+- Справочник: [CLI](docs/reference/cli.md),
+  [конфигурация](docs/reference/configuration.md),
+  [структура проекта](docs/reference/project-layout.md)
+- [Безопасность](docs/security.md) · [Решение проблем](docs/troubleshooting.md)
+
+## Для разработчиков CLI
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate       # Windows: .\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+python -m pytest
 ```
 
-`--ask-token` requests a publish token; `--ask-pull-token` separately requests the
-read-only token stored for server pulls. When `application.registry_auth_file` is
-configured but that file does not yet exist on disk, the command creates it once as
-ignored portable inline auth. Existing valid auth is
-preserved byte-for-byte; invalid/helper-backed files are never overwritten. POSIX uses
-mode `0600`; Windows uses an owner-only ACL. Do not copy a Docker Desktop/macOS
-`config.json` that relies on `credsStore` or `credHelpers` to the VPS.
-
-The first command can bootstrap a password-only root account, creates the deployment
-SSH key when absent, hardens the host and deploys immutable registry images. Source code
-is never built or uploaded on the server.
-
-- [Complete usage guide](GUIDE.md)
-- [Minimal backend/frontend example](examples/demo-app)
-
-Prefer an isolated `venv` or `pipx` installation so the CLI's Python dependencies do
-not conflict with packages installed globally.
-
-For contributors, the legacy root `config/` and `environments/` layout remains accepted
-as a compatibility fixture. New applications must use project-local `.deploy/`.
+Новые приложения используют project-local `.deploy/`. Корневые `config/` и
+`environments/` оставлены только как fixture обратной совместимости.

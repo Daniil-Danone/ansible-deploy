@@ -1,0 +1,20 @@
+---
+schema_version: 1
+environment: stage
+server:
+  host: 192.0.2.10
+  ssh_port: 22
+  bootstrap_user: root
+  deploy_user: deploy
+  ssh_key: .deploy/keys/stage_ed25519
+  public_key: .deploy/keys/stage_ed25519.pub
+  host_key_fingerprints:
+    - SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+application:
+  compose: deploy/compose.stage.yml
+  env_file: .deploy/environments/stage/app.env
+  remote_dir: /srv/demo-stage
+  allowed_loopback_ports: [8080]
+domain: stage.example.com
+acme_email: ops@example.com
+health_path: /health

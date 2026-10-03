@@ -1,0 +1,16 @@
+---
+- name: Require all declared Compose services to be running and healthy
+  ansible.builtin.assert:
+    that:
+      - compose_declared_services | length > 0
+      - >-
+        (compose_service_containers | map(attribute='Service') | sort) ==
+        (compose_declared_services | sort)
+      - >-
+        (compose_service_containers |
+        rejectattr('State', 'equalto', 'running') | list | length) == 0
+      - >-
+        (compose_service_containers | selectattr('Health', 'defined') |
+        rejectattr('Health', 'equalto', '') |
+        rejectattr('Health', 'equalto', 'healthy') | list | length) == 0
+    fail_msg: "Not every declared Compose service is running and healthy"

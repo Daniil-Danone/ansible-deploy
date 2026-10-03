@@ -68,7 +68,7 @@ class ServerConfig(StrictModel):
     def expand_path(cls, value: str) -> Path:
         # Symlink validation must see the path exactly as configured; resolving here
         # would erase the evidence before the key-safety boundary can reject it.
-        return Path(value).expanduser().absolute()
+        return Path(value).expanduser()
 
     @field_validator("bootstrap_user", "deploy_user")
     @classmethod

@@ -1,0 +1,146 @@
+---
+- name: Install Nginx and Certbot
+  ansible.builtin.apt:
+    name: [nginx, certbot]
+    state: present
+
+- name: Create ACME webroot
+  ansible.builtin.file:
+    path: /var/www/letsencrypt
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+
+- name: Detect existing certificate
+  ansible.builtin.stat:
+    path: "/etc/letsencrypt/live/{{ app_domain }}/fullchain.pem"
+  register: existing_certificate
+
+- name: Install HTTP bootstrap virtual host
+  ansible.builtin.copy:
+    dest: "/etc/nginx/sites-available/{{ app_nginx_site }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      server {
+          listen 80;
+          listen [::]:80;
+          server_name {{ app_domain }};
+          location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+          location / { proxy_pass http://127.0.0.1:{{ app_upstream_port }}; }
+      }
+  notify:
+    - Validate nginx
+    - Reload nginx
+  when: not ansible_check_mode and not existing_certificate.stat.exists
+
+- name: Enable application virtual host
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/{{ app_nginx_site }}"
+    dest: "/etc/nginx/sites-enabled/{{ app_nginx_site }}"
+    state: link
+  notify:
+    - Validate nginx
+    - Reload nginx
+  when: not ansible_check_mode
+
+- name: Disable default virtual host
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify:
+    - Validate nginx
+    - Reload nginx
+  when: not ansible_check_mode
+
+- name: Remove legacy shared application virtual host link
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/application
+    state: absent
+  notify:
+    - Validate nginx
+    - Reload nginx
+  when: not ansible_check_mode
+
+- name: Apply HTTP virtual host before ACME request
+  ansible.builtin.meta: flush_handlers
+  when: not existing_certificate.stat.exists
+
+- name: Obtain or renew Let's Encrypt certificate
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly --webroot -w /var/www/letsencrypt
+      --non-interactive --agree-tos --keep-until-expiring
+      --email {{ acme_email }} -d {{ app_domain }}
+    creates: "/etc/letsencrypt/live/{{ app_domain }}/fullchain.pem"
+  when: not ansible_check_mode
+  no_log: true
+  notify:
+    - Validate nginx
+    - Reload nginx
+
+- name: Install HTTPS virtual host
+  ansible.builtin.copy:
+    dest: "/etc/nginx/sites-available/{{ app_nginx_site }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      server {
+          listen 80;
+          listen [::]:80;
+          server_name {{ app_domain }};
+          location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+          location / { return 301 https://$host$request_uri; }
+      }
+      server {
+          listen 443 ssl http2;
+          listen [::]:443 ssl http2;
+          server_name {{ app_domain }};
+          ssl_certificate /etc/letsencrypt/live/{{ app_domain }}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/{{ app_domain }}/privkey.pem;
+          ssl_protocols TLSv1.2 TLSv1.3;
+          add_header Strict-Transport-Security "max-age=31536000" always;
+          add_header X-Content-Type-Options nosniff always;
+          add_header X-Frame-Options DENY always;
+          location / {
+              proxy_pass http://127.0.0.1:{{ app_upstream_port }};
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+          }
+      }
+  when: not ansible_check_mode
+  notify:
+    - Validate nginx
+    - Reload nginx
+
+- name: Install safe Certbot Nginx deployment hook
+  ansible.builtin.copy:
+    dest: /etc/letsencrypt/renewal-hooks/deploy/20-reload-nginx
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      /usr/sbin/nginx -t
+      /usr/bin/systemctl reload nginx
+
+- name: Enable Nginx
+  ansible.builtin.service:
+    name: nginx
+    enabled: true
+    state: started
+
+- name: Enable automatic certificate renewal timer
+  ansible.builtin.service:
+    name: certbot.timer
+    enabled: true
+    state: started
+
+- name: Apply HTTPS virtual host
+  ansible.builtin.meta: flush_handlers

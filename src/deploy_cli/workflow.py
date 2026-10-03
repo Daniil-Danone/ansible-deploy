@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 
 from .models import EnvironmentConfig, GlobalConfig
-from .runner import AnsibleRunner, RunnerError, ansible_vars
+from .runner import AnsibleRunner, RunnerError, ansible_vars, prepare_state_directory
 
 
 def deployment_manifest(config: EnvironmentConfig) -> tuple[str, list[str]]:
@@ -50,8 +50,7 @@ def deployment_manifest(config: EnvironmentConfig) -> tuple[str, list[str]]:
 
 
 def write_inventory(repo: Path, config: EnvironmentConfig, *, bootstrap: bool) -> Path:
-    state = repo / ".deploy-state" / config.environment
-    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state = prepare_state_directory(repo, config.environment)
     path = state / ("bootstrap.yml" if bootstrap else "managed.yml")
     user = config.server.bootstrap_user if bootstrap else config.server.deploy_user
     content = (

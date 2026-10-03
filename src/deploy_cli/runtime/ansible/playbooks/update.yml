@@ -1,0 +1,13 @@
+---
+- name: Reapply managed server controls
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - role: environment_identity
+    - role: common
+    - role: hardening
+    - role: security_updates
+    - role: docker
+    - role: reboot_timer
+    - role: reverse_proxy

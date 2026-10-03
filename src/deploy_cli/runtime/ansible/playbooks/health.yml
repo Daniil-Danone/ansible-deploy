@@ -1,0 +1,14 @@
+---
+- name: Verify public environment health
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Verify public HTTPS health endpoint
+      ansible.builtin.uri:
+        url: "https://{{ app_domain }}{{ health_path }}"
+        status_code: 200
+        validate_certs: true
+      register: public_health
+      retries: 6
+      delay: 5
+      until: public_health.status == 200

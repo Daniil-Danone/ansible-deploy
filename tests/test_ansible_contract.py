@@ -62,6 +62,11 @@ def test_release_metadata_and_rollback_preserve_safe_permissions_and_health() ->
     assert "check_mode: false" in application
     assert "final_previous" in application
     assert "Reject any change to authoritative host identity" in guard
+    assert "Reject bootstrap access after the environment has been claimed" in guard
+    assert "require_unclaimed_environment" in guard
+    assert "deployment_identity_files.results[0].stat.exists" in guard
+    assert "deployment_identity_files.results[1].stat.exists" in guard
+    assert "committed_release_metadata_file.stat.exists" in guard
     assert "pull: never" in rollback
     assert "pull: never" in abort
     assert "original_previous" in restore

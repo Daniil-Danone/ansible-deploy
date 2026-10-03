@@ -124,17 +124,67 @@ def deploy(
     )
     bootstrap_inventory = write_inventory(repo, config, bootstrap=True)
     managed_inventory = write_inventory(repo, config, bootstrap=False)
-    runner.playbook(
-        "guard_environment.yml",
-        bootstrap_inventory,
-        variables,
-        config.server.ssh_key,
-        check=dry_run,
-        exit_code=3,
-        bootstrap_password=bootstrap_password,
-    )
-    # A check run cannot safely predict creation of a user and reconnect as that user.
-    if not dry_run:
+    managed_error: RunnerError | None = None
+    try:
+        runner.playbook(
+            "verify_deploy_access.yml",
+            managed_inventory,
+            variables,
+            config.server.ssh_key,
+            exit_code=4,
+        )
+        managed_access = True
+    except RunnerError as error:
+        managed_error = error
+        managed_access = False
+        if dry_run:
+            raise RunnerError(
+                f"Managed deployment access failed: {managed_error}. "
+                "For a pristine server, run the first deployment without --dry-run "
+                "using a pre-authorized bootstrap SSH key or --ask-bootstrap-password",
+                managed_error.exit_code,
+            ) from managed_error
+
+    if managed_access:
+        runner.playbook(
+            "guard_environment.yml",
+            managed_inventory,
+            variables,
+            config.server.ssh_key,
+            check=dry_run,
+            exit_code=3,
+        )
+    else:
+        # Probe bootstrap access without mutation. Once managed access is established,
+        # an identity-guard failure above is authoritative and never falls back to root.
+        if managed_error is None:
+            raise RuntimeError("managed access state is inconsistent")
+        try:
+            runner.playbook(
+                "verify_deploy_access.yml",
+                bootstrap_inventory,
+                variables,
+                config.server.ssh_key,
+                exit_code=4,
+                bootstrap_password=bootstrap_password,
+            )
+        except RunnerError as bootstrap_error:
+            raise RunnerError(
+                f"Managed deployment access failed: {managed_error}; "
+                f"bootstrap SSH access also failed: {bootstrap_error}. "
+                "Authorize the generated public key for the bootstrap user or rerun "
+                "with --ask-bootstrap-password",
+                bootstrap_error.exit_code,
+            ) from bootstrap_error
+        bootstrap_guard_variables = dict(variables, require_unclaimed_environment=True)
+        runner.playbook(
+            "guard_environment.yml",
+            bootstrap_inventory,
+            bootstrap_guard_variables,
+            config.server.ssh_key,
+            exit_code=3,
+            bootstrap_password=bootstrap_password,
+        )
         runner.playbook(
             "bootstrap.yml",
             bootstrap_inventory,
@@ -149,6 +199,7 @@ def deploy(
             config.server.ssh_key,
             exit_code=4,
         )
+    if not dry_run:
         runner.playbook(
             "abort_release.yml",
             managed_inventory,

@@ -17,23 +17,63 @@ password authentication. Only ports 22, 80 and 443 are allowed by UFW. The fixtu
 binds its upstream to `127.0.0.1`; database, Redis and application ports are never
 published publicly. Application `.env` and Compose files are installed as `0600`.
 
-## Configure and deploy
+## Quickstart
 
-1. Copy `environments/stage/.env.example` to `environments/stage/stage.env` and
-   fill it locally. This file is ignored by Git.
-2. Edit `environments/stage/config.yml`: real VPS IP, users, SSH key/public-key
-   paths, domain and ACME email. Record the VPS host-key SHA256 fingerprint obtained
-   through a trusted provider console/out-of-band channel. Point DNS A/AAAA records
-   at the VPS first. The CLI rejects both a first connection with a different key
-   and any later host-key change; trusted keys persist in `.deploy-state/known_hosts`.
-3. Install the CLI: `python -m pip install -e .`.
-4. Preview managed-host changes: `deploy stage --dry-run`. Bootstrap is deliberately
-   not attempted in check mode; the `deploy` account must already exist.
-5. Deploy: `deploy stage`.
-6. Verify: `deploy status stage` and run the acceptance checks below.
+The workstation needs Python 3.12+, Docker and the OpenSSH client. For a new Stage VPS:
 
-Reapply OS controls to an existing Stage server with
-`deploy server update stage`; `--dry-run` is supported. Any new hardening control
+1. Point the domain's DNS A/AAAA record at the VPS.
+2. Copy `environments/stage/.env.example` to `environments/stage/stage.env`, then set
+   application values and review `environments/stage/docker-compose.yml`.
+3. Edit `environments/stage/config.yml`: set the VPS address, domain, ACME email and the
+   SSH host-key SHA256 fingerprint shown by the provider console. Normally the configured
+   SSH key paths can stay unchanged.
+4. Install and deploy:
+
+   ```text
+   python -m pip install -e .
+   deploy stage
+   ```
+
+   If the initial `root` SSH login uses a password instead of a preinstalled key:
+
+   ```text
+   deploy stage --ask-bootstrap-password
+   ```
+
+   The password is requested with hidden input, used only for the initial bootstrap and
+   never written to config, inventory or local state. The CLI creates the Ed25519 deploy
+   key automatically when both configured key files are absent, installs its public half
+   on the server and uses that key for all subsequent connections. Existing keys are never
+   rotated; a missing `.pub` is safely restored from its private key.
+5. Verify: `deploy status stage`.
+
+`--ask-bootstrap-password` cannot be combined with `--dry-run`, because check mode does not
+create the managed `deploy` account. A normal `deploy stage --dry-run` is useful after the
+first deployment. Reapply OS controls with `deploy server update stage`.
+
+The CLI rejects a lone public key when its matching private key is absent instead of
+overwriting it. It also pins the server host key in the environment-specific
+`.deploy-state` directory and rejects later host-key changes.
+
+Key publication is serialized per key pair and exclusive: concurrent deploy commands never
+replace each other's files, and symlink/aliased private and public destinations are rejected.
+On Windows and Linux, the private file keeps the permissions created by `ssh-keygen`; the CLI
+then asks the platform OpenSSH client to read it and fails if its permissions or ACL are not
+accepted. Bootstrap passwords preserve spaces and tabs exactly; NUL, CR and LF are rejected
+because they would make the one-shot stdin protocol ambiguous. The container exposes the
+password to Ansible through a single-use executable password helper backed by `/dev/shm`;
+the helper unlinks its backing file before returning the exact bytes.
+
+## Advanced configuration
+
+Obtain the configured host-key fingerprint through the provider's trusted web/serial
+console rather than trusting an unauthenticated network scan. `bootstrap_user` defaults to
+`root`; a key-only initial login remains the default when `--ask-bootstrap-password` is not
+passed. The application env file is ignored by Git and must never be committed.
+
+For an already bootstrapped server, `deploy stage --dry-run` previews managed-host changes;
+bootstrap is deliberately not attempted in check mode, so the `deploy` account must already
+exist. `deploy server update stage --dry-run` is also supported. Any new hardening control
 is added to the versioned global schema and the `hardening` role, then exercised on
 Stage through this command.
 
@@ -53,13 +93,16 @@ Stage through this command.
    rejected. Persistent data must use named volumes or an explicitly approved normalized
    absolute path from `allowed_bind_paths`, so release directories never become database
    storage.
-3. Edit `environments/prod/config.yml` with Production-only VPS, key, out-of-band host
+3. Edit `environments/prod/config.yml` with Production-only VPS, key paths, out-of-band host
    fingerprint, domain, ACME email and `/srv` or `/opt` runtime. Never reuse Stage paths.
+   The key is created automatically on the first real deployment when both files are absent.
 4. Preview with `deploy prod --dry-run --version <git-sha>`; dry-run is read-only and
    does not require confirmation.
 5. Deploy interactively with `deploy prod --version <git-sha>`, then type `prod` after
    reviewing the printed environment, host and domain. Automation must explicitly use
-   `deploy prod --yes --version <git-sha>`.
+   `deploy prod --yes --version <git-sha>`. For an initial password-only root login, add
+   `--ask-bootstrap-password`; the Production confirmation is completed first, followed by
+   the hidden password prompt.
 6. Verify with `deploy status prod`. Reapply shared controls with
    `deploy server update prod` or, in deterministic Stage-then-Prod order,
    `deploy server update all`. The `all` form attempts both environments, reports each

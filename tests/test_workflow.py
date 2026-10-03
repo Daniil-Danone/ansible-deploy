@@ -83,6 +83,37 @@ def test_dry_run_does_not_mutate_bootstrap_access(tmp_path: Path) -> None:
     assert all(call.kwargs["check"] is True for call in runner.playbook.call_args_list)
 
 
+def test_password_is_used_only_for_bootstrap_connection(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    key = tmp_path / "key"
+    public_key = tmp_path / "key.pub"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    public_key.write_text("public", encoding="utf-8")
+    config.application.env_file = env
+    config.server.ssh_key = key
+    config.server.public_key = public_key
+    runner = Mock()
+
+    deploy(
+        repo,
+        global_config,
+        config,
+        runner,
+        dry_run=False,
+        bootstrap_password="root-password",  # noqa: S106 - synthetic test value
+    )
+
+    calls = runner.playbook.call_args_list
+    assert [call.kwargs.get("bootstrap_password") for call in calls[:2]] == [
+        "root-password",
+        "root-password",
+    ]
+    assert all(call.kwargs.get("bootstrap_password") is None for call in calls[2:])
+
+
 def test_dns_preflight_resolves_server_hostname(monkeypatch) -> None:
     repo = Path(__file__).parents[1]
     _, config = load_configuration(repo, "stage")

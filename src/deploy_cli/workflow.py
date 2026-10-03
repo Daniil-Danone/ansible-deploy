@@ -109,6 +109,7 @@ def deploy(
     *,
     dry_run: bool,
     deployment_version: str = "unmanaged",
+    bootstrap_password: str | None = None,
 ) -> None:
     checksum, images = deployment_manifest(config)
     variables = ansible_vars(
@@ -131,10 +132,17 @@ def deploy(
         config.server.ssh_key,
         check=dry_run,
         exit_code=3,
+        bootstrap_password=bootstrap_password,
     )
     # A check run cannot safely predict creation of a user and reconnect as that user.
     if not dry_run:
-        runner.playbook("bootstrap.yml", bootstrap_inventory, variables, config.server.ssh_key)
+        runner.playbook(
+            "bootstrap.yml",
+            bootstrap_inventory,
+            variables,
+            config.server.ssh_key,
+            bootstrap_password=bootstrap_password,
+        )
         runner.playbook(
             "verify_deploy_access.yml",
             managed_inventory,

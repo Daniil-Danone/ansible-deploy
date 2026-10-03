@@ -1,7 +1,9 @@
 import argparse
+import getpass
 import re
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 from .config import (
@@ -13,6 +15,7 @@ from .config import (
     validate_production_isolation,
     validate_registry_auth,
 )
+from .keys import ensure_deploy_key
 from .models import EnvironmentConfig, GlobalConfig
 from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
@@ -27,6 +30,11 @@ def _parser() -> argparse.ArgumentParser:
     for environment, label in (("stage", "Stage"), ("prod", "Production")):
         deploy_parser = sub.add_parser(environment, help=f"Provision and deploy {label}")
         deploy_parser.add_argument("--dry-run", action="store_true")
+        deploy_parser.add_argument(
+            "--ask-bootstrap-password",
+            action="store_true",
+            help="prompt securely for the initial SSH password",
+        )
         deploy_parser.add_argument("--version", help="Deployment version (defaults to Git SHA)")
         if environment == "prod":
             deploy_parser.add_argument("--yes", action="store_true")
@@ -76,6 +84,22 @@ def _confirm_production(config_environment: str, host: str, domain: str, *, yes:
         raise ConfigurationError("Production operation was not confirmed")
 
 
+def _prompt_bootstrap_password(user: str, host: str) -> str:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            password = getpass.getpass(f"Bootstrap SSH password for {user}@{host}: ")
+    except getpass.GetPassWarning as exc:
+        raise ConfigurationError(
+            "Secure password input is unavailable; run from an interactive terminal"
+        ) from exc
+    if not password:
+        raise ConfigurationError("Bootstrap SSH password cannot be empty")
+    if any(character in password for character in ("\0", "\r", "\n")):
+        raise ConfigurationError("Bootstrap SSH password cannot contain NUL, CR or LF")
+    return password
+
+
 def _load_and_validate(
     repo: Path, environment: str, command: str
 ) -> tuple[GlobalConfig, EnvironmentConfig]:
@@ -89,7 +113,7 @@ def _load_and_validate(
     elif command in {"server", "rollback"}:
         validate_local_inputs(config, require_public_key=False, require_application=False)
     else:
-        validate_local_inputs(config)
+        validate_local_inputs(config, require_ssh=False, require_public_key=False)
         validate_compose(config)
         validate_environment_file(config)
         validate_registry_auth(config)
@@ -100,6 +124,15 @@ def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     repo = args.repo.resolve()
     try:
+        if (
+            args.command in {"stage", "prod"}
+            and args.ask_bootstrap_password
+            and args.dry_run
+        ):
+            raise ConfigurationError(
+                "--ask-bootstrap-password cannot be used with --dry-run; "
+                "bootstrap is not performed in check mode"
+            )
         environment = args.command if args.command in {"stage", "prod"} else args.environment
         environments = ["stage", "prod"] if environment == "all" else [environment]
         loaded = [_load_and_validate(repo, name, args.command) for name in environments]
@@ -117,12 +150,27 @@ def run(argv: list[str] | None = None) -> int:
                 yes=args.yes,
             )
 
+        if args.command in {"stage", "prod"}:
+            for _, config in loaded:
+                if not args.dry_run:
+                    print(f"[KEY] {ensure_deploy_key(config)}")
+                validate_local_inputs(config, require_application=False)
+
+        bootstrap_password: str | None = None
+        if args.command in {"stage", "prod"} and args.ask_bootstrap_password:
+            bootstrap_password = _prompt_bootstrap_password(
+                loaded[0][1].server.bootstrap_user,
+                loaded[0][1].server.host,
+            )
+
         update_failures: list[tuple[str, RunnerError]] = []
         for current_environment, (global_config, config) in zip(environments, loaded, strict=True):
             secret_values: set[str] = set()
             if config.application.env_file.is_file():
                 env_text = config.application.env_file.read_text(encoding="utf-8")
                 secret_values = secrets_from_env(env_text)
+            if bootstrap_password is not None:
+                secret_values.add(bootstrap_password)
             redactor = Redactor(secret_values | {str(config.server.ssh_key)})
             runner = AnsibleRunner(
                 repo, redactor, environment=current_environment, verbose=args.verbose
@@ -140,6 +188,7 @@ def run(argv: list[str] | None = None) -> int:
                     runner,
                     dry_run=args.dry_run,
                     deployment_version=version,
+                    bootstrap_password=bootstrap_password,
                 )
                 print(f"[OK] {current_environment} deployment {version} completed")
             elif args.command == "rollback":

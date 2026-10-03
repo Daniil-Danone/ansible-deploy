@@ -1,6 +1,7 @@
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -8,6 +9,28 @@ from pathlib import Path
 
 from .config import ConfigurationError
 from .models import EnvironmentConfig
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _lock_descriptor(descriptor: int) -> None:
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+
+    def _unlock_descriptor(descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock_descriptor(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+    def _unlock_descriptor(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 def ensure_deploy_key(config: EnvironmentConfig) -> str:
@@ -118,17 +141,7 @@ def _pair_lock(path: Path) -> Iterator[None]:
             or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
         ):
             raise ConfigurationError("Deploy key lock must be one non-aliased regular file")
-        if os.name == "nt":
-            import msvcrt
-
-            if os.fstat(descriptor).st_size == 0:
-                os.write(descriptor, b"0")
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_EX)  # type: ignore[attr-defined]
+        _lock_descriptor(descriptor)
     except OSError as exc:
         if descriptor is not None:
             os.close(descriptor)
@@ -141,11 +154,7 @@ def _pair_lock(path: Path) -> Iterator[None]:
         yield
     finally:
         try:
-            if os.name == "nt":
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)  # type: ignore[attr-defined]
+            _unlock_descriptor(descriptor)
         finally:
             os.close(descriptor)
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import EnvironmentConfig, GlobalConfig
+from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .runner import AnsibleRunner, RunnerError, ansible_vars, prepare_state_directory
 
 
@@ -49,7 +49,9 @@ def deployment_manifest(config: EnvironmentConfig) -> tuple[str, list[str]]:
     return digest.hexdigest(), images
 
 
-def write_inventory(repo: Path, config: EnvironmentConfig, *, bootstrap: bool) -> Path:
+def write_inventory(
+    repo: Path, config: EnvironmentConfig | MonitoringConfig, *, bootstrap: bool
+) -> Path:
     state = prepare_state_directory(repo, config.environment)
     path = state / ("bootstrap.yml" if bootstrap else "managed.yml")
     user = config.server.bootstrap_user if bootstrap else config.server.deploy_user
@@ -63,7 +65,7 @@ def write_inventory(repo: Path, config: EnvironmentConfig, *, bootstrap: bool) -
     return path
 
 
-def dns_preflight(config: EnvironmentConfig) -> None:
+def dns_preflight(config: EnvironmentConfig | MonitoringConfig) -> None:
     domain_addresses = _resolved_addresses(config.domain, 443)
     server_addresses = _resolved_addresses(config.server.host, config.server.ssh_port)
     if not domain_addresses.intersection(server_addresses):
@@ -331,3 +333,191 @@ def status(config: EnvironmentConfig, *, timeout: float = 10.0) -> None:
                 raise RunnerError(f"Health check returned HTTP {response.status}", 7)
     except (OSError, urllib.error.URLError) as exc:
         raise RunnerError(f"Health check failed: {exc}", 7) from exc
+
+
+def deploy_monitoring(
+    repo: Path,
+    global_config: GlobalConfig,
+    config: MonitoringConfig,
+    runner: AnsibleRunner,
+    *,
+    dry_run: bool,
+    bootstrap_password: str | None = None,
+) -> None:
+    """Provision monitoring without entering the application release transaction."""
+    variables = ansible_vars(global_config, config)
+    runner.build_image()
+    runner.trust_host(
+        config.server.host, config.server.ssh_port, config.server.host_key_fingerprints
+    )
+    managed = write_inventory(repo, config, bootstrap=False)
+    bootstrap = write_inventory(repo, config, bootstrap=True)
+    try:
+        runner.playbook(
+            "verify_deploy_access.yml", managed, variables, config.server.ssh_key, exit_code=4
+        )
+    except RunnerError as managed_error:
+        if dry_run:
+            raise RunnerError(
+                f"Managed deployment access failed: {managed_error}. "
+                "Bootstrap monitoring before using --dry-run",
+                managed_error.exit_code,
+            ) from managed_error
+        runner.playbook(
+            "verify_deploy_access.yml",
+            bootstrap,
+            variables,
+            config.server.ssh_key,
+            exit_code=4,
+            bootstrap_password=bootstrap_password,
+        )
+        runner.playbook(
+            "guard_environment.yml",
+            bootstrap,
+            dict(variables, require_unclaimed_environment=True),
+            config.server.ssh_key,
+            exit_code=3,
+            bootstrap_password=bootstrap_password,
+        )
+        runner.playbook(
+            "bootstrap.yml",
+            bootstrap,
+            variables,
+            config.server.ssh_key,
+            bootstrap_password=bootstrap_password,
+        )
+        runner.playbook(
+            "verify_deploy_access.yml", managed, variables, config.server.ssh_key, exit_code=4
+        )
+    else:
+        runner.playbook(
+            "guard_environment.yml",
+            managed,
+            variables,
+            config.server.ssh_key,
+            check=dry_run,
+            exit_code=3,
+        )
+    runner.playbook(
+        "monitoring.yml",
+        managed,
+        variables,
+        config.server.ssh_key,
+        observability_secret_file=config.monitoring.secrets_file,
+        check=dry_run,
+        exit_code=6,
+    )
+    if not dry_run:
+        runner.playbook(
+            "monitoring_status.yml", managed, variables, config.server.ssh_key, exit_code=7
+        )
+
+
+def update_monitoring(
+    repo: Path,
+    global_config: GlobalConfig,
+    config: MonitoringConfig,
+    runner: AnsibleRunner,
+    *,
+    dry_run: bool,
+) -> None:
+    runner.build_image()
+    runner.trust_host(
+        config.server.host, config.server.ssh_port, config.server.host_key_fingerprints
+    )
+    inventory = write_inventory(repo, config, bootstrap=False)
+    variables = ansible_vars(global_config, config)
+    runner.playbook(
+        "guard_environment.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        check=dry_run,
+        exit_code=3,
+    )
+    runner.playbook(
+        "monitoring_update.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        observability_secret_file=config.monitoring.secrets_file,
+        check=dry_run,
+        exit_code=6,
+    )
+
+
+def deploy_collector(
+    repo: Path,
+    global_config: GlobalConfig,
+    config: EnvironmentConfig,
+    runner: AnsibleRunner,
+    *,
+    dry_run: bool,
+) -> None:
+    if config.collector is None:
+        raise RunnerError(f"Collector is not configured for {config.environment}", 2)
+    runner.build_image()
+    runner.trust_host(
+        config.server.host, config.server.ssh_port, config.server.host_key_fingerprints
+    )
+    inventory = write_inventory(repo, config, bootstrap=False)
+    variables = ansible_vars(global_config, config)
+    runner.playbook(
+        "guard_environment.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        check=dry_run,
+        exit_code=3,
+    )
+    runner.playbook(
+        "collector.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        observability_secret_file=config.collector.password_file,
+        check=dry_run,
+        exit_code=6,
+    )
+    if not dry_run:
+        runner.playbook(
+            "collector_status.yml", inventory, variables, config.server.ssh_key, exit_code=7
+        )
+
+
+def collector_status(
+    repo: Path,
+    global_config: GlobalConfig,
+    config: EnvironmentConfig,
+    runner: AnsibleRunner,
+) -> None:
+    runner.build_image()
+    runner.trust_host(
+        config.server.host, config.server.ssh_port, config.server.host_key_fingerprints
+    )
+    inventory = write_inventory(repo, config, bootstrap=False)
+    variables = ansible_vars(global_config, config)
+    runner.playbook(
+        "guard_environment.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        exit_code=3,
+    )
+    runner.playbook(
+        "collector_status.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        exit_code=7,
+    )
+
+
+def monitoring_status(config: MonitoringConfig, *, timeout: float = 10.0) -> None:
+    url = f"https://{config.domain}/api/health"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+            if response.status != 200:
+                raise RunnerError(f"Grafana health returned HTTP {response.status}", 7)
+    except (OSError, urllib.error.URLError) as exc:
+        raise RunnerError(f"Grafana health check failed: {exc}", 7) from exc

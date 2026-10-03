@@ -12,7 +12,7 @@ from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path, PurePosixPath
 
-from .models import EnvironmentConfig, GlobalConfig
+from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .redaction import Redactor
 
 
@@ -116,6 +116,7 @@ class AnsibleRunner:
         compose_file: Path | None = None,
         env_file: Path | None = None,
         registry_auth_file: Path | None = None,
+        observability_secret_file: Path | None = None,
         check: bool = False,
         exit_code: int = 5,
         bootstrap_password: str | None = None,
@@ -156,6 +157,11 @@ class AnsibleRunner:
             args[3:3] = ["-v", f"{env_file}:/run/secrets/app_env:ro"]
         if registry_auth_file is not None:
             args[3:3] = ["-v", f"{registry_auth_file}:/run/secrets/registry_auth:ro"]
+        if observability_secret_file is not None:
+            args[3:3] = [
+                "-v",
+                f"{observability_secret_file}:/run/secrets/observability:ro",
+            ]
         if check:
             args.extend(["--check", "--diff"])
         if self.verbose:
@@ -321,7 +327,7 @@ def _copy_resource_tree(source: Traversable, destination: Path) -> None:
 
 def ansible_vars(
     global_config: GlobalConfig,
-    config: EnvironmentConfig,
+    config: EnvironmentConfig | MonitoringConfig,
     *,
     deployment_version: str = "unmanaged",
     deployment_checksum: str = "unmanaged",
@@ -332,27 +338,11 @@ def ansible_vars(
     public_key = ""
     if config.server.public_key.is_file():
         public_key = config.server.public_key.read_text(encoding="utf-8").strip()
-    return {
+    variables: dict[str, object] = {
         "deploy_user": config.server.deploy_user,
         "deploy_ssh_port": config.server.ssh_port,
         "deploy_public_key": public_key,
-        "app_compose_file": "/run/config/compose.yml",
-        "app_env_file": "/run/secrets/app_env",
-        "app_registry_auth_file": (
-            "/run/secrets/registry_auth"
-            if config.application.registry_auth_file is not None
-            else ""
-        ),
-        "app_dir": config.application.remote_dir,
         "app_environment": config.environment,
-        "app_compose_project": (
-            PurePosixPath(config.application.remote_dir).name
-            if config.environment == "stage"
-            else "myapp_prod"
-        ),
-        "app_upstream_port": 8080,
-        "app_allowed_bind_paths": config.application.allowed_bind_paths,
-        "app_nginx_site": f"application-{config.environment}",
         "deploy_identity_dir": "/etc/ansible-deploy",
         "deploy_identity_file": "/etc/ansible-deploy/identity.json",
         "deploy_legacy_identity_file": "/etc/ansible-deploy/environment",
@@ -361,10 +351,56 @@ def ansible_vars(
         "deployment_images": deployment_images or [],
         "app_domain": config.domain,
         "acme_email": config.acme_email,
-        "health_path": config.health_path,
         "reboot_time": reboot.time,
         "reboot_timezone": reboot.timezone,
         "reboot_enabled": reboot.enabled,
         "security_updates_enabled": global_config.global_.security_updates.enabled,
         "hardening_controls": controls.model_dump(),
     }
+    if isinstance(config, MonitoringConfig):
+        variables.update(
+            {
+                "monitoring_dir": config.monitoring.remote_dir,
+                "monitoring_secret_file": "/run/secrets/observability",
+                "monitoring_retention_days": config.monitoring.retention_days,
+                "monitoring_grafana_port": config.monitoring.grafana_port,
+                "monitoring_loki_port": config.monitoring.loki_port,
+                "app_nginx_site": "monitoring",
+                "app_dir": config.monitoring.remote_dir,
+                "app_compose_project": "ansible_deploy_monitoring",
+                "app_upstream_port": config.monitoring.grafana_port,
+                "health_path": "/api/health",
+            }
+        )
+    else:
+        variables.update(
+            {
+                "app_compose_file": "/run/config/compose.yml",
+                "app_env_file": "/run/secrets/app_env",
+                "app_registry_auth_file": (
+                    "/run/secrets/registry_auth"
+                    if config.application.registry_auth_file is not None
+                    else ""
+                ),
+                "app_dir": config.application.remote_dir,
+                "app_compose_project": (
+                    PurePosixPath(config.application.remote_dir).name
+                    if config.environment == "stage"
+                    else "myapp_prod"
+                ),
+                "app_upstream_port": 8080,
+                "health_path": config.health_path,
+                "app_allowed_bind_paths": config.application.allowed_bind_paths,
+                "app_nginx_site": f"application-{config.environment}",
+            }
+        )
+        if config.collector is not None:
+            variables.update(
+                {
+                    "collector_dir": config.collector.remote_dir,
+                    "collector_push_url": config.collector.push_url,
+                    "collector_username": config.collector.username,
+                    "collector_password_file": "/run/secrets/observability",
+                }
+            )
+    return variables

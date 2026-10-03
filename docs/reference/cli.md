@@ -39,13 +39,24 @@ pull token используется для server auth. Prod confirmation эта
 
 ```text
 deploy status {stage,prod}
-deploy server update {stage,prod,all} [--dry-run] [--yes]
+deploy server update {stage,prod,monitoring,all} [--dry-run] [--yes]
 deploy rollback prod [--yes]
 ```
 
 `status` делает только HTTPS GET к `domain + health_path`; он не проверяет SSH,
 контейнеры или ресурсы. `server update` не выпускает application release. Rollback
 возвращает предыдущую app-конфигурацию/images, но не БД.
+
+## Monitoring и collectors
+
+```text
+deploy monitoring {deploy,status,update} [--dry-run] [--ask-bootstrap-password]
+deploy collectors {deploy,status,update} {stage,prod,all} [--dry-run] [--yes]
+```
+
+Эти команды не входят в application release/rollback transaction. Операции collectors
+`all` всегда идут Stage → Prod, после ошибки пытаются обработать остальные окружения и
+только затем возвращают ошибку.
 
 ## Коды завершения
 

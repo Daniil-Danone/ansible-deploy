@@ -1,0 +1,58 @@
+---
+- name: Create collector directory
+  ansible.builtin.file:
+    path: "{{ collector_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Deliver collector password securely
+  ansible.builtin.copy:
+    src: "{{ collector_password_file }}"
+    dest: "{{ collector_dir }}/push.password"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Install declarative Alloy collector configuration
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: "{{ collector_dir }}/config.alloy"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install collector Compose definition without public ports
+  ansible.builtin.copy:
+    dest: "{{ collector_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      services:
+        alloy:
+          image: grafana/alloy:v1.10.2
+          container_name: ansible-deploy-alloy
+          command: [run, /etc/alloy/config.alloy]
+          user: "0:0"
+          volumes:
+            - ./config.alloy:/etc/alloy/config.alloy:ro
+            - ./push.password:/run/secrets/push.password:ro
+            - /var/run/docker.sock:/var/run/docker.sock:ro
+            - /var/log/journal:/var/log/journal:ro
+            - /run/log/journal:/run/log/journal:ro
+          restart: unless-stopped
+
+- name: Reconcile Alloy collector independently from application releases
+  community.docker.docker_compose_v2:
+    project_src: "{{ collector_dir }}"
+    files: [compose.yml]
+    project_name: "ansible_deploy_collector_{{ app_environment }}"
+    pull: missing
+    state: present
+    remove_orphans: true
+    wait: true
+  no_log: true
+  when: not ansible_check_mode

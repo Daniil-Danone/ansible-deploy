@@ -40,6 +40,11 @@ global:
 - `allowed_bind_paths`: разрешённые absolute server bind sources;
 - `required_env_vars`: уникальные uppercase имена;
 - `domain`, `acme_email`: TLS target и контакт Let's Encrypt.
+- `collector.push_url`: только HTTPS endpoint `/loki/api/v1/push`;
+- `collector.username`, `collector.password_file`: Basic Auth collector и отдельный
+  локальный secret-файл внутри project root.
+- `collector.remote_dir`: отдельный leaf ниже `/opt` или `/srv`; он не может совпадать,
+  содержать или находиться внутри application `remote_dir`.
 
 `APP_ENV` в env обязан совпадать с environment. Значения env не печатаются.
 
@@ -72,3 +77,17 @@ Build paths не выходят за project root. Целевой Compose дол
 
 Stage не требует digest у всех сторонних images, поэтому его immutability слабее. Для
 реальной воспроизводимости закрепляйте digest в обоих окружениях.
+
+## Monitoring `config.yml`
+
+Monitoring использует те же `server`, `domain`, `acme_email`, но вместо `application`
+содержит `monitoring`: `remote_dir`, `secrets_file`, `retention_days`, loopback-порты
+Grafana/Loki. Secret env содержит `GF_SECURITY_ADMIN_USER`,
+`GF_SECURITY_ADMIN_PASSWORD`, `LOKI_PUSH_USERNAME`, `LOKI_PUSH_PASSWORD_HASH`.
+Реальный файл игнорируется Git и монтируется read-only, без содержимого в argv,
+process env или Ansible extra-vars.
+
+`collector.push_url` разбирается структурно: разрешён только
+`https://host[:port]/loki/api/v1/push`, без userinfo, query, fragment и whitespace.
+Monitoring/application/collector runtime directories не могут указывать на системные
+корни и обязаны быть нормализованными отдельными каталогами ниже `/opt` или `/srv`.

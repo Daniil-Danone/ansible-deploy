@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import ConfigurationError
-from .models import EnvironmentConfig
+from .models import EnvironmentConfig, MonitoringConfig
 
 if sys.platform == "win32":
     import msvcrt
@@ -33,7 +33,7 @@ else:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
-def ensure_deploy_key(config: EnvironmentConfig) -> str:
+def ensure_deploy_key(config: EnvironmentConfig | MonitoringConfig) -> str:
     """Create or complete the configured key pair without replacing any path."""
     private_key = _canonical_key_path(config.server.ssh_key)
     public_key = _canonical_key_path(config.server.public_key)

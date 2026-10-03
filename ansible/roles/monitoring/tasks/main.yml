@@ -1,0 +1,283 @@
+---
+- name: Install monitoring reverse proxy dependencies
+  ansible.builtin.apt:
+    name: [nginx, certbot]
+    state: present
+
+- name: Create monitoring directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ monitoring_dir }}", mode: "0750"}
+    - {path: "{{ monitoring_dir }}/grafana/provisioning/datasources", mode: "0755"}
+    - {path: "{{ monitoring_dir }}/grafana/provisioning/dashboards", mode: "0755"}
+    - {path: "{{ monitoring_dir }}/grafana/dashboards", mode: "0755"}
+    - {path: /var/www/letsencrypt, mode: "0755"}
+
+- name: Deliver monitoring secrets securely
+  ansible.builtin.copy:
+    src: "{{ monitoring_secret_file }}"
+    dest: "{{ monitoring_dir }}/monitoring.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Render authenticated Loki push credentials idempotently
+  ansible.builtin.shell: |
+    set -eu
+    user=$(sed -n 's/^LOKI_PUSH_USERNAME=//p' "{{ monitoring_dir }}/monitoring.env")
+    hash=$(sed -n 's/^LOKI_PUSH_PASSWORD_HASH=//p' "{{ monitoring_dir }}/monitoring.env")
+    test -n "$user" && test -n "$hash"
+    umask 077
+    tmp=$(mktemp /etc/nginx/.loki-htpasswd.XXXXXX)
+    trap 'rm -f "$tmp"' EXIT
+    printf '%s:%s\n' "$user" "$hash" > "$tmp"
+    if test -f /etc/nginx/loki.htpasswd && cmp -s "$tmp" /etc/nginx/loki.htpasswd; then
+      exit 0
+    fi
+    install -m 0640 -o root -g www-data "$tmp" /etc/nginx/loki.htpasswd
+    exit 10
+  args:
+    executable: /bin/sh
+  register: monitoring_htpasswd
+  changed_when: monitoring_htpasswd.rc == 10
+  failed_when: monitoring_htpasswd.rc not in [0, 10]
+  no_log: true
+
+- name: Install Loki retention configuration
+  ansible.builtin.copy:
+    dest: "{{ monitoring_dir }}/loki.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      auth_enabled: false
+      server:
+        http_listen_port: 3100
+      common:
+        path_prefix: /loki
+        replication_factor: 1
+        ring:
+          instance_addr: 127.0.0.1
+          kvstore: {store: inmemory}
+      schema_config:
+        configs:
+          - from: "2024-01-01"
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index: {prefix: index_, period: 24h}
+      storage_config:
+        filesystem: {directory: /loki/chunks}
+      compactor:
+        working_directory: /loki/compactor
+        retention_enabled: true
+        delete_request_store: filesystem
+      limits_config:
+        retention_period: {{ monitoring_retention_days }}d
+
+- name: Provision Loki datasource
+  ansible.builtin.copy:
+    dest: "{{ monitoring_dir }}/grafana/provisioning/datasources/loki.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: Loki
+          uid: loki
+          type: loki
+          access: proxy
+          url: http://loki:3100
+          isDefault: true
+          editable: false
+
+- name: Provision log dashboard provider
+  ansible.builtin.copy:
+    dest: "{{ monitoring_dir }}/grafana/provisioning/dashboards/provider.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      apiVersion: 1
+      providers:
+        - name: ansible-deploy
+          type: file
+          disableDeletion: true
+          editable: false
+          options: {path: /var/lib/grafana/dashboards}
+
+- name: Provision bounded-label log dashboard
+  ansible.builtin.copy:
+    dest: "{{ monitoring_dir }}/grafana/dashboards/logs.json"
+    owner: root
+    group: root
+    mode: "0644"
+    content: >-
+      {{ {'title': 'Stage and Production logs', 'uid': 'central-logs',
+      'schemaVersion': 39, 'version': 1,
+      'templating': {'list': [
+      {'name': 'environment', 'type': 'query', 'datasource': {'type': 'loki', 'uid': 'loki'},
+      'query': {'type': 1, 'label': 'environment', 'refId': 'LokiVariableQueryEditor-VariableQuery'},
+      'refresh': 2},
+      {'name': 'service', 'type': 'query', 'datasource': {'type': 'loki', 'uid': 'loki'},
+      'query': {'type': 1, 'label': 'service', 'stream': '{environment=~"$environment"}',
+      'refId': 'LokiVariableQueryEditor-VariableQuery'}, 'refresh': 2}]},
+      'panels': [{'type': 'logs', 'title': 'Logs', 'datasource': {'type': 'loki', 'uid': 'loki'},
+      'targets': [{'expr': '{environment=~"$environment", service=~"$service"}', 'refId': 'A'}],
+      'gridPos': {'h': 20, 'w': 24, 'x': 0, 'y': 0}}]} | to_json }}
+
+- name: Install monitoring Compose definition with loopback-only raw ports
+  ansible.builtin.copy:
+    dest: "{{ monitoring_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      services:
+        loki:
+          image: grafana/loki:3.5.5
+          command: [-config.file=/etc/loki/local-config.yaml]
+          volumes:
+            - ./loki.yml:/etc/loki/local-config.yaml:ro
+            - loki-data:/loki
+          ports: ["127.0.0.1:{{ monitoring_loki_port }}:3100"]
+          restart: unless-stopped
+        grafana:
+          image: grafana/grafana:12.1.1
+          env_file: [monitoring.env]
+          environment:
+            GF_SERVER_DOMAIN: "{{ app_domain }}"
+            GF_SERVER_ROOT_URL: "https://{{ app_domain }}"
+            GF_USERS_ALLOW_SIGN_UP: "false"
+          volumes:
+            - grafana-data:/var/lib/grafana
+            - ./grafana/provisioning:/etc/grafana/provisioning:ro
+            - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+          ports: ["127.0.0.1:{{ monitoring_grafana_port }}:3000"]
+          depends_on: [loki]
+          restart: unless-stopped
+      volumes:
+        loki-data: {}
+        grafana-data: {}
+
+- name: Reconcile monitoring Compose services
+  community.docker.docker_compose_v2:
+    project_src: "{{ monitoring_dir }}"
+    files: [compose.yml]
+    project_name: ansible_deploy_monitoring
+    pull: missing
+    state: present
+    remove_orphans: true
+    wait: true
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Detect existing monitoring certificate
+  ansible.builtin.stat:
+    path: "/etc/letsencrypt/live/{{ app_domain }}/fullchain.pem"
+  register: monitoring_certificate
+
+- name: Install monitoring HTTP bootstrap virtual host
+  ansible.builtin.copy:
+    dest: /etc/nginx/sites-available/monitoring
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      server {
+        listen 80; listen [::]:80; server_name {{ app_domain }};
+        location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+        location / { proxy_pass http://127.0.0.1:{{ monitoring_grafana_port }}; }
+      }
+  when: not ansible_check_mode and not monitoring_certificate.stat.exists
+  notify: [Validate nginx, Reload nginx]
+
+- name: Enable monitoring virtual host
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/monitoring
+    dest: /etc/nginx/sites-enabled/monitoring
+    state: link
+  when: not ansible_check_mode
+  notify: [Validate nginx, Reload nginx]
+
+- name: Disable default virtual host
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  when: not ansible_check_mode
+  notify: [Validate nginx, Reload nginx]
+
+- name: Apply monitoring HTTP virtual host
+  ansible.builtin.meta: flush_handlers
+  when: not monitoring_certificate.stat.exists
+
+- name: Obtain or renew monitoring certificate
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly --webroot -w /var/www/letsencrypt --non-interactive
+      --agree-tos --keep-until-expiring --email {{ acme_email }} -d {{ app_domain }}
+    creates: "/etc/letsencrypt/live/{{ app_domain }}/fullchain.pem"
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Install authenticated HTTPS monitoring gateway
+  ansible.builtin.copy:
+    dest: /etc/nginx/sites-available/monitoring
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      server {
+        listen 80; listen [::]:80; server_name {{ app_domain }};
+        location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+        location / { return 301 https://$host$request_uri; }
+      }
+      server {
+        listen 443 ssl http2; listen [::]:443 ssl http2; server_name {{ app_domain }};
+        ssl_certificate /etc/letsencrypt/live/{{ app_domain }}/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/{{ app_domain }}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        location = /loki/api/v1/push {
+          auth_basic "Loki push";
+          auth_basic_user_file /etc/nginx/loki.htpasswd;
+          proxy_pass http://127.0.0.1:{{ monitoring_loki_port }};
+        }
+        location / {
+          proxy_pass http://127.0.0.1:{{ monitoring_grafana_port }};
+          proxy_set_header Host $host;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+      }
+  when: not ansible_check_mode
+  notify: [Validate nginx, Reload nginx]
+
+- name: Enable monitoring HTTPS services
+  ansible.builtin.service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: [nginx, certbot.timer]
+
+- name: Install safe monitoring certificate deployment hook
+  ansible.builtin.copy:
+    dest: /etc/letsencrypt/renewal-hooks/deploy/20-reload-nginx
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      /usr/sbin/nginx -t
+      /usr/bin/systemctl reload nginx
+
+- name: Apply monitoring HTTPS virtual host
+  ansible.builtin.meta: flush_handlers

@@ -2,13 +2,42 @@ import ipaddress
 import re
 from pathlib import Path, PurePosixPath
 from typing import Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+
+def _managed_remote_dir(value: str, *, field: str) -> str:
+    path = PurePosixPath(value)
+    normalized = str(path)
+    if (
+        not path.is_absolute()
+        or value != normalized
+        or ".." in path.parts
+        or "." in path.parts
+        or len(path.parts) < 3
+        or path.parts[1] not in {"srv", "opt"}
+        or any(not re.fullmatch(r"[A-Za-z0-9._-]+", part) for part in path.parts[2:])
+    ):
+        raise ValueError(
+            f"{field} must be a normalized dedicated directory below /srv or /opt"
+        )
+    return normalized
+
+
+def _paths_overlap(first: str, second: str) -> bool:
+    first_path = PurePosixPath(first)
+    second_path = PurePosixPath(second)
+    return (
+        first_path == second_path
+        or first_path in second_path.parents
+        or second_path in first_path.parents
+    )
 
 
 class RebootConfig(StrictModel):
@@ -106,19 +135,7 @@ class ApplicationConfig(StrictModel):
     @field_validator("remote_dir")
     @classmethod
     def absolute_remote_dir(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        normalized = str(path)
-        if (
-            not path.is_absolute()
-            or value != normalized
-            or ".." in path.parts
-            or "." in path.parts
-            or len(path.parts) < 3
-            or path.parts[1] not in {"srv", "opt"}
-            or any(not re.fullmatch(r"[A-Za-z0-9._-]+", part) for part in path.parts[2:])
-        ):
-            raise ValueError("remote_dir must be normalized and located below /srv or /opt")
-        return normalized
+        return _managed_remote_dir(value, field="application remote_dir")
 
     @field_validator("registry_auth_file", mode="before")
     @classmethod
@@ -144,6 +161,59 @@ class ApplicationConfig(StrictModel):
         return values
 
 
+class CollectorConfig(StrictModel):
+    push_url: str
+    username: str = Field(pattern=r"^[A-Za-z0-9._-]{1,64}$")
+    password_file: Path
+    remote_dir: str = "/opt/ansible-deploy/alloy"
+
+    @field_validator("password_file", mode="before")
+    @classmethod
+    def expand_password_path(cls, value: str) -> Path:
+        return Path(value).expanduser()
+
+    @field_validator("push_url")
+    @classmethod
+    def secure_push_url(cls, value: str) -> str:
+        if not value or value != value.strip() or re.search(r"\s", value):
+            raise ValueError("push_url cannot contain whitespace")
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("push_url must contain a valid HTTPS authority") from exc
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path != "/loki/api/v1/push"
+            or parsed.query
+            or parsed.fragment
+            or "?" in value
+            or "#" in value
+            or not re.fullmatch(
+                r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?",
+                parsed.netloc,
+            )
+        ):
+            raise ValueError(
+                "push_url must be https://host[:port]/loki/api/v1/push without credentials, "
+                "query or fragment"
+            )
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("push_url port must be between 1 and 65535")
+        try:
+            ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            _validate_domain(parsed.hostname, field="push_url host")
+        return value
+
+    @field_validator("remote_dir")
+    @classmethod
+    def safe_remote_dir(cls, value: str) -> str:
+        return _managed_remote_dir(value, field="collector remote_dir")
+
 class EnvironmentConfig(StrictModel):
     schema_version: Literal[1]
     environment: Literal["stage", "prod"]
@@ -152,12 +222,60 @@ class EnvironmentConfig(StrictModel):
     domain: str
     acme_email: str
     health_path: str = "/health"
+    collector: CollectorConfig | None = None
 
     @model_validator(mode="after")
     def secure_health_path(self) -> "EnvironmentConfig":
         if not self.health_path.startswith("/"):
             raise ValueError("health_path must start with /")
+        if self.collector is not None and _paths_overlap(
+            self.application.remote_dir, self.collector.remote_dir
+        ):
+            raise ValueError(
+                "collector remote_dir must not equal, contain or be contained by "
+                "application remote_dir"
+            )
         return self
+
+    @field_validator("domain")
+    @classmethod
+    def safe_domain(cls, value: str) -> str:
+        return _validate_domain(value, field="domain")
+
+    @field_validator("acme_email")
+    @classmethod
+    def safe_email(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", value):
+            raise ValueError("acme_email must be a safe email address")
+        _validate_domain(value.rsplit("@", 1)[1], field="acme_email domain")
+        return value
+
+
+class MonitoringStackConfig(StrictModel):
+    remote_dir: str = "/opt/ansible-deploy/monitoring"
+    secrets_file: Path
+    retention_days: int = Field(default=30, ge=1, le=3650)
+    grafana_port: int = Field(default=3000, ge=1, le=65535)
+    loki_port: int = Field(default=3100, ge=1, le=65535)
+
+    @field_validator("secrets_file", mode="before")
+    @classmethod
+    def expand_secret_path(cls, value: str) -> Path:
+        return Path(value).expanduser()
+
+    @field_validator("remote_dir")
+    @classmethod
+    def safe_remote_dir(cls, value: str) -> str:
+        return _managed_remote_dir(value, field="monitoring remote_dir")
+
+
+class MonitoringConfig(StrictModel):
+    schema_version: Literal[1]
+    environment: Literal["monitoring"]
+    server: ServerConfig
+    domain: str
+    acme_email: str
+    monitoring: MonitoringStackConfig
 
     @field_validator("domain")
     @classmethod

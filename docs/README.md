@@ -15,6 +15,7 @@
 - [Настоящий проект](guides/real-project.md) — backend, frontend, admin, gateway, БД и Redis.
 - [Приватные registry](guides/private-registries.md) — два токена и безопасный auth-файл.
 - [Production](guides/production.md) — изоляция, подтверждение и rollback.
+- [Централизованные логи](guides/monitoring.md) — Grafana, Loki и Alloy collectors.
 
 ## Понимание системы
 

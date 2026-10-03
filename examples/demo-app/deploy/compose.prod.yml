@@ -1,0 +1,22 @@
+services:
+  backend:
+    image: ghcr.io/OWNER/demo-backend@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+  frontend:
+    image: ghcr.io/OWNER/demo-frontend@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12

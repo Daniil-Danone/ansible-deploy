@@ -1,0 +1,8 @@
+---
+- name: Verify deployment account before SSH hardening
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Verify passwordless sudo
+      ansible.builtin.command: sudo -n true
+      changed_when: false

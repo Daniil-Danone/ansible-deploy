@@ -15,6 +15,7 @@ from .config import (
     validate_production_isolation,
     validate_registry_auth,
 )
+from .images import publish_images
 from .keys import ensure_deploy_key
 from .models import EnvironmentConfig, GlobalConfig
 from .redaction import Redactor, secrets_from_env
@@ -24,7 +25,14 @@ from .workflow import deploy, dns_preflight, rollback, status, update_server
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="deploy")
-    parser.add_argument("--repo", type=Path, default=Path.cwd(), help=argparse.SUPPRESS)
+    project = parser.add_mutually_exclusive_group()
+    project.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="application project directory (default: current directory)",
+    )
+    project.add_argument("--repo", dest="project_dir", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
     for environment, label in (("stage", "Stage"), ("prod", "Production")):
@@ -49,6 +57,15 @@ def _parser() -> argparse.ArgumentParser:
     rollback_parser = sub.add_parser("rollback", help="Roll back Production application/config")
     rollback_parser.add_argument("environment", choices=["prod"])
     rollback_parser.add_argument("--yes", action="store_true")
+    images = sub.add_parser("images", help="Build and publish application images")
+    images_sub = images.add_subparsers(dest="images_command", required=True)
+    publish = images_sub.add_parser("publish", help="Publish images and pin Compose digests")
+    publish.add_argument("environment", choices=["stage", "prod"])
+    publish.add_argument("--registry", required=True, choices=["ghcr", "dockerhub"])
+    publish.add_argument("--namespace", required=True)
+    publish.add_argument("--username")
+    publish.add_argument("--ask-token", action="store_true")
+    publish.add_argument("--tag", help="image tag (defaults to application Git SHA)")
     return parser
 
 
@@ -122,8 +139,22 @@ def _load_and_validate(
 
 def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    repo = args.repo.resolve()
+    project_dir = args.project_dir.resolve()
     try:
+        if args.command == "images":
+            published = publish_images(
+                project_dir,
+                args.environment,
+                registry=args.registry,
+                namespace=args.namespace,
+                username=args.username,
+                ask_token=args.ask_token,
+                tag=args.tag,
+            )
+            for image in published:
+                print(f"[IMAGE] {image.service}: {image.immutable_reference}")
+            print(f"[OK] Published {len(published)} images and updated {args.environment} Compose")
+            return 0
         if (
             args.command in {"stage", "prod"}
             and args.ask_bootstrap_password
@@ -135,7 +166,7 @@ def run(argv: list[str] | None = None) -> int:
             )
         environment = args.command if args.command in {"stage", "prod"} else args.environment
         environments = ["stage", "prod"] if environment == "all" else [environment]
-        loaded = [_load_and_validate(repo, name, args.command) for name in environments]
+        loaded = [_load_and_validate(project_dir, name, args.command) for name in environments]
         is_dry_run = getattr(args, "dry_run", False)
         if (
             any(name == "prod" for name in environments)
@@ -173,16 +204,16 @@ def run(argv: list[str] | None = None) -> int:
                 secret_values.add(bootstrap_password)
             redactor = Redactor(secret_values | {str(config.server.ssh_key)})
             runner = AnsibleRunner(
-                repo, redactor, environment=current_environment, verbose=args.verbose
+                project_dir, redactor, environment=current_environment, verbose=args.verbose
             )
             if args.command == "status":
                 status(config)
                 print(f"[OK] https://{config.domain}{config.health_path} is healthy")
             elif args.command in {"stage", "prod"}:
                 dns_preflight(config)
-                version = _deployment_version(repo, args.version)
+                version = _deployment_version(project_dir, args.version)
                 deploy(
-                    repo,
+                    project_dir,
                     global_config,
                     config,
                     runner,
@@ -192,11 +223,13 @@ def run(argv: list[str] | None = None) -> int:
                 )
                 print(f"[OK] {current_environment} deployment {version} completed")
             elif args.command == "rollback":
-                rollback(repo, global_config, config, runner)
+                rollback(project_dir, global_config, config, runner)
                 print("[OK] prod rollback completed and verified")
             else:
                 try:
-                    update_server(repo, global_config, config, runner, dry_run=args.dry_run)
+                    update_server(
+                        project_dir, global_config, config, runner, dry_run=args.dry_run
+                    )
                     print(f"[OK] {current_environment} server state updated")
                 except RunnerError as exc:
                     if environment != "all":

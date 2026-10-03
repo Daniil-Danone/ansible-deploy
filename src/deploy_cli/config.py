@@ -1,5 +1,6 @@
 import ipaddress
 import json
+import os
 import re
 import socket
 from pathlib import Path
@@ -24,11 +25,51 @@ def _load_yaml[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
         raise ConfigurationError(f"Invalid configuration {path}: {exc}") from exc
 
 
-def load_configuration(repo: Path, environment: str) -> tuple[GlobalConfig, EnvironmentConfig]:
+def _configuration_root(project_dir: Path) -> Path:
+    project_deploy = project_dir / ".deploy"
+    if project_deploy.is_symlink():
+        raise ConfigurationError("Project .deploy directory cannot be a symbolic link")
+    if project_deploy.exists():
+        return project_deploy
+    return project_dir
+
+
+def _project_application_path(project_dir: Path, configured: Path, *, field: str) -> Path:
+    relative = not configured.is_absolute()
+    candidate = project_dir / configured if relative else configured
+    resolved = candidate.resolve(strict=False)
+    if not relative:
+        return resolved
+    try:
+        resolved.relative_to(project_dir)
+    except ValueError as exc:
+        raise ConfigurationError(f"Relative {field} path escapes the project directory") from exc
+    return resolved
+
+
+def _project_key_path(project_dir: Path, configured: Path, *, field: str) -> Path:
+    """Validate containment canonically but preserve symlinks for the key safety guard."""
+    relative = not configured.is_absolute()
+    lexical = Path(os.path.abspath(project_dir / configured if relative else configured))
+    if relative:
+        try:
+            lexical.resolve(strict=False).relative_to(project_dir)
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"Relative {field} path escapes the project directory"
+            ) from exc
+    return lexical
+
+
+def load_configuration(
+    project_dir: Path, environment: str
+) -> tuple[GlobalConfig, EnvironmentConfig]:
     if environment not in {"stage", "prod"}:
         raise ConfigurationError(f"Environment is not implemented yet: {environment}")
-    global_config = _load_yaml(repo / "config/global.yml", GlobalConfig)
-    env_path = repo / "environments" / environment / "config.yml"
+    project_dir = project_dir.resolve()
+    config_root = _configuration_root(project_dir)
+    global_config = _load_yaml(config_root / "config/global.yml", GlobalConfig)
+    env_path = config_root / "environments" / environment / "config.yml"
     env_config = _load_yaml(env_path, EnvironmentConfig)
     if env_config.environment != environment:
         raise ConfigurationError(
@@ -36,10 +77,20 @@ def load_configuration(repo: Path, environment: str) -> tuple[GlobalConfig, Envi
             f"file declares {env_config.environment!r}"
         )
     app = env_config.application
-    app.compose = (repo / app.compose).resolve()
-    app.env_file = (repo / app.env_file).resolve()
-    if app.registry_auth_file is not None and not app.registry_auth_file.is_absolute():
-        app.registry_auth_file = (repo / app.registry_auth_file).resolve()
+    app.compose = _project_application_path(project_dir, app.compose, field="Compose")
+    app.env_file = _project_application_path(
+        project_dir, app.env_file, field="environment file"
+    )
+    if app.registry_auth_file is not None:
+        app.registry_auth_file = _project_application_path(
+            project_dir, app.registry_auth_file, field="registry authentication"
+        )
+    env_config.server.ssh_key = _project_key_path(
+        project_dir, env_config.server.ssh_key, field="SSH private key"
+    )
+    env_config.server.public_key = _project_key_path(
+        project_dir, env_config.server.public_key, field="SSH public key"
+    )
     return global_config, env_config
 
 

@@ -1,0 +1,178 @@
+---
+- name: Create application release directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0750"
+  loop:
+    - "{{ app_dir }}"
+    - "{{ app_dir }}/releases"
+    - "{{ app_dir }}/releases/{{ deployment_version }}"
+
+- name: Create deploy user Docker configuration directory
+  ansible.builtin.file:
+    path: "/home/{{ deploy_user }}/.docker"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0700"
+  when: app_registry_auth_file | length > 0
+
+- name: Deliver registry authentication securely
+  ansible.builtin.copy:
+    src: "{{ app_registry_auth_file }}"
+    dest: "/home/{{ deploy_user }}/.docker/config.json"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  no_log: true
+  when: app_registry_auth_file | length > 0
+
+- name: Inspect existing immutable release metadata
+  ansible.builtin.stat:
+    path: "{{ app_dir }}/releases/{{ deployment_version }}/deployment.json"
+  register: release_metadata_file
+
+- name: Read existing immutable release metadata
+  ansible.builtin.slurp:
+    src: "{{ app_dir }}/releases/{{ deployment_version }}/deployment.json"
+  register: existing_release_metadata
+  when: release_metadata_file.stat.exists
+
+- name: Reject reused version with different deployment inputs
+  ansible.builtin.assert:
+    that:
+      - >-
+        (existing_release_metadata.content | b64decode | from_json).checksum
+        == deployment_checksum
+    fail_msg: "Deployment version already exists with a different input checksum"
+  when: release_metadata_file.stat.exists
+
+- name: Deliver immutable release Compose definition
+  ansible.builtin.copy:
+    src: "{{ app_compose_file }}"
+    dest: "{{ app_dir }}/releases/{{ deployment_version }}/compose.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  when: not release_metadata_file.stat.exists
+
+- name: Deliver immutable release environment securely
+  ansible.builtin.copy:
+    src: "{{ app_env_file }}"
+    dest: "{{ app_dir }}/releases/{{ deployment_version }}/.env"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  no_log: true
+  when: not release_metadata_file.stat.exists
+
+- name: Write immutable release metadata last
+  ansible.builtin.copy:
+    dest: "{{ app_dir }}/releases/{{ deployment_version }}/deployment.json"
+    content: >-
+      {{ {'checksum': deployment_checksum, 'environment': app_environment,
+      'images': deployment_images,
+      'routing': {'domain': app_domain, 'health_path': health_path,
+      'upstream_port': app_upstream_port},
+      'version': deployment_version} | to_nice_json }}
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  when: not release_metadata_file.stat.exists
+
+- name: Inspect active release links and transaction
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ app_dir }}/current"
+    - "{{ app_dir }}/previous"
+    - "{{ app_dir }}/transaction.json"
+  register: application_state
+  check_mode: false
+
+- name: Require recovery before starting another transaction
+  ansible.builtin.assert:
+    that: not application_state.results[2].stat.exists
+    fail_msg: "An unfinished deployment transaction must be recovered first"
+
+- name: Read existing release link targets
+  ansible.builtin.command:
+    cmd: readlink "{{ item.path }}"
+  loop:
+    - path: "{{ app_dir }}/current"
+      exists: "{{ application_state.results[0].stat.islnk | default(false) }}"
+    - path: "{{ app_dir }}/previous"
+      exists: "{{ application_state.results[1].stat.islnk | default(false) }}"
+  when: item.exists | bool
+  changed_when: false
+  check_mode: false
+  register: release_link_targets
+
+- name: Persist deployment transaction before candidate activation
+  ansible.builtin.copy:
+    dest: "{{ app_dir }}/transaction.json"
+    content: >-
+      {{ {'candidate': app_dir + '/releases/' + deployment_version,
+      'final_previous':
+      (release_link_targets.results[1].stdout | default(''))
+      if (release_link_targets.results[0].stdout | default(''))
+      == app_dir + '/releases/' + deployment_version
+      else (release_link_targets.results[0].stdout | default('')),
+      'original_current': release_link_targets.results[0].stdout | default(''),
+      'original_previous': release_link_targets.results[1].stdout | default('')} | to_nice_json }}
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  when: not ansible_check_mode
+
+- name: Point candidate at requested immutable release
+  ansible.builtin.file:
+    src: "{{ app_dir }}/releases/{{ deployment_version }}"
+    dest: "{{ app_dir }}/candidate"
+    state: link
+    force: true
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+  when: not ansible_check_mode
+
+- name: Reconcile candidate application services
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}/candidate"
+    files: [compose.yml]
+    env_files: [.env]
+    project_name: "{{ app_compose_project }}"
+    pull: always
+    state: present
+    remove_orphans: true
+    wait: true
+    wait_timeout: 120
+  become_user: "{{ deploy_user }}"
+  become: true
+  no_log: true
+  register: candidate_compose
+  when: not ansible_check_mode
+
+- name: Require every candidate service to be running and healthy
+  ansible.builtin.assert:
+    that:
+      - candidate_compose.containers | length > 0
+      - item.State == 'running'
+      - item.Health in ['', 'healthy']
+    fail_msg: "Candidate Compose service is not running and healthy"
+  loop: "{{ candidate_compose.containers }}"
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Verify candidate loopback endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_upstream_port }}{{ health_path }}"
+    status_code: 200
+  register: candidate_health
+  retries: 12
+  delay: 5
+  until: candidate_health.status == 200
+  when: not ansible_check_mode

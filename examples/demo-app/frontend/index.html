@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="ru">
+  <head><meta charset="utf-8"><title>ansible-deploy demo</title></head>
+  <body>
+    <h1>Demo application</h1>
+    <p id="status">Проверяем backend…</p>
+    <script>
+      fetch('/api/health').then(r => r.json()).then(data => {
+        document.querySelector('#status').textContent = `Backend: ${data.status}`;
+      });
+    </script>
+  </body>
+</html>

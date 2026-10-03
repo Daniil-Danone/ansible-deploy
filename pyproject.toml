@@ -29,6 +29,15 @@ deploy = "deploy_cli.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/deploy_cli"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/deploy_cli",
+  "/tests",
+  "/pyproject.toml",
+  "/README.md",
+  "/GUIDE.md",
+]
+
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config -q"
 testpaths = ["tests"]

@@ -1,0 +1,182 @@
+---
+- name: Inspect committed and legacy application state
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ app_dir }}/current"
+    - "{{ app_dir }}/compose.yml"
+    - "{{ app_dir }}/.env"
+    - "{{ app_dir }}/fixture-nginx.conf"
+  register: legacy_application_state
+  check_mode: false
+
+- name: Require complete legacy state
+  ansible.builtin.assert:
+    that:
+      - >-
+        legacy_application_state.results[1].stat.exists ==
+        legacy_application_state.results[2].stat.exists
+      - >-
+        not legacy_application_state.results[1].stat.exists or
+        legacy_application_state.results[3].stat.exists
+    fail_msg: >-
+      Point-1 legacy adoption requires compose.yml, .env and fixture-nginx.conf
+  when: not (legacy_application_state.results[0].stat.islnk | default(false))
+
+- name: Reject legacy Production adoption
+  ansible.builtin.assert:
+    that: app_environment == 'stage'
+    fail_msg: "Only the point-1 Stage runtime can use legacy adoption"
+  when:
+    - not (legacy_application_state.results[0].stat.islnk | default(false))
+    - legacy_application_state.results[1].stat.exists
+
+- name: Verify and snapshot legacy Stage without changing its Compose project
+  when:
+    - not ansible_check_mode
+    - not (legacy_application_state.results[0].stat.islnk | default(false))
+    - legacy_application_state.results[1].stat.exists
+  block:
+    - name: Read raw legacy Compose definition
+      ansible.builtin.slurp:
+        src: "{{ app_dir }}/compose.yml"
+      register: legacy_compose_raw
+      no_log: true
+
+    - name: Parse raw legacy Compose definition
+      ansible.builtin.set_fact:
+        legacy_compose_definition: >-
+          {{ legacy_compose_raw.content | b64decode | from_yaml }}
+      no_log: true
+
+    - name: Validate legacy Compose portability before identity commit
+      ansible.builtin.include_role:
+        name: legacy_compose_guard
+      no_log: true
+
+    - name: Read declared legacy Compose services
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - "{{ app_compose_project }}"
+          - --project-directory
+          - "{{ app_dir }}"
+          - -f
+          - "{{ app_dir }}/compose.yml"
+          - config
+          - --services
+      become_user: "{{ deploy_user }}"
+      become: true
+      changed_when: false
+      register: legacy_declared_services
+
+    - name: Wait for every legacy Compose container to become healthy
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - "{{ app_compose_project }}"
+          - --project-directory
+          - "{{ app_dir }}"
+          - -f
+          - "{{ app_dir }}/compose.yml"
+          - ps
+          - --all
+          - --format
+          - json
+      become_user: "{{ deploy_user }}"
+      become: true
+      changed_when: false
+      failed_when: false
+      register: legacy_containers_result
+      retries: 24
+      delay: 5
+      until:
+        - legacy_containers_result.rc == 0
+        - >-
+          (legacy_containers_result.stdout_lines | default([]) |
+          reject('equalto', '') | map('from_json') | list |
+          map(attribute='Service') | sort) ==
+          (legacy_declared_services.stdout_lines | sort)
+        - >-
+          (legacy_containers_result.stdout_lines | default([]) |
+          reject('equalto', '') | map('from_json') | list |
+          rejectattr('State', 'equalto', 'running') | list | length) == 0
+        - >-
+          (legacy_containers_result.stdout_lines | default([]) |
+          reject('equalto', '') | map('from_json') | list |
+          selectattr('Health', 'defined') |
+          rejectattr('Health', 'equalto', '') |
+          rejectattr('Health', 'equalto', 'healthy') | list | length) == 0
+
+    - name: Normalize verified legacy Compose NDJSON
+      ansible.builtin.include_role:
+        name: compose_ps_normalize
+      vars:
+        compose_ps_normalize_stdout_lines: "{{ legacy_containers_result.stdout_lines }}"
+
+    - name: Define declared legacy Compose services
+      ansible.builtin.set_fact:
+        compose_declared_services: "{{ legacy_declared_services.stdout_lines }}"
+
+    - name: Require every legacy Compose service to be running and healthy
+      ansible.builtin.include_role:
+        name: compose_health_guard
+
+    - name: Verify legacy loopback endpoint before adoption
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_upstream_port }}{{ health_path }}"
+        status_code: 200
+
+    - name: Verify legacy public HTTPS endpoint before adoption
+      ansible.builtin.uri:
+        url: "https://{{ app_domain }}{{ health_path }}"
+        status_code: 200
+        validate_certs: true
+
+    - name: Calculate secret-safe legacy release checksum
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail && sha256sum compose.yml .env fixture-nginx.conf |
+          sha256sum | cut -d ' ' -f 1
+        chdir: "{{ app_dir }}"
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      register: legacy_checksum_result
+
+    - name: Read legacy immutable image references
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - "{{ app_compose_project }}"
+          - --project-directory
+          - "{{ app_dir }}"
+          - -f
+          - "{{ app_dir }}/compose.yml"
+          - config
+          - --images
+      become_user: "{{ deploy_user }}"
+      become: true
+      changed_when: false
+      register: legacy_images_result
+
+    - name: Define verified synthetic legacy release
+      ansible.builtin.set_fact:
+        legacy_release_checksum: >-
+          {{ [legacy_checksum_result.stdout, app_domain, health_path,
+          app_upstream_port | string] | join('|') | hash('sha256') }}
+        legacy_release_id: >-
+          legacy-{{ [legacy_checksum_result.stdout, app_domain, health_path,
+          app_upstream_port | string] | join('|') | hash('sha256') }}
+        legacy_release_images: "{{ legacy_images_result.stdout_lines | sort }}"
+
+    - name: Snapshot and commit verified legacy release
+      ansible.builtin.include_role:
+        name: legacy_snapshot

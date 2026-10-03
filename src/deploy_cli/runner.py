@@ -2,10 +2,14 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections.abc import Sequence
+from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path, PurePosixPath
 
 from .models import EnvironmentConfig, GlobalConfig
@@ -22,16 +26,25 @@ class AnsibleRunner:
     def __init__(
         self, repo: Path, redactor: Redactor, *, environment: str = "stage", verbose: bool = False
     ) -> None:
-        self.repo = repo
+        self.project_dir = repo.resolve()
+        # Kept as a compatibility alias for callers/tests written before project-local mode.
+        self.repo = self.project_dir
         self.environment = environment
         self.redactor = redactor
-        self.state_dir = repo / ".deploy-state" / environment
+        self.state_dir = deployment_state_dir(self.project_dir, environment)
         self.verbose = verbose
 
     def build_image(self) -> None:
-        self._run(["docker", "build", "-t", "ansible-deploy:local", "."], exit_code=5)
+        with tempfile.TemporaryDirectory(prefix="ansible-deploy-runtime-") as directory:
+            context = Path(directory)
+            _copy_resource_tree(runtime_resources(), context)
+            self._run(
+                ["docker", "build", "-t", "ansible-deploy:local", str(context)],
+                exit_code=5,
+            )
 
     def trust_host(self, host: str, port: int, expected_fingerprints: list[str]) -> None:
+        self.state_dir = prepare_state_directory(self.project_dir, self.environment)
         container_name = self._container_name()
         args = [
             "docker",
@@ -79,7 +92,6 @@ class AnsibleRunner:
         trusted = {line for line in scanned if _fingerprint(line) in expected_fingerprints}
         if not trusted:
             raise RunnerError("SSH host key does not match a configured SHA256 fingerprint", 3)
-        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         known_hosts = self.state_dir / "known_hosts"
         if known_hosts.exists():
             existing = {
@@ -108,6 +120,7 @@ class AnsibleRunner:
         exit_code: int = 5,
         bootstrap_password: str | None = None,
     ) -> None:
+        self.state_dir = deployment_state_dir(self.project_dir, self.environment)
         args = [
             "docker",
             "run",
@@ -115,15 +128,15 @@ class AnsibleRunner:
             "-v",
             f"{self.state_dir}:/state",
             "-v",
-            f"{self.repo}:/workspace:ro",
+            f"{inventory}:/run/config/inventory.yml:ro",
             "-v",
             f"{ssh_key}:/run/secrets/ssh_key:ro",
             "-e",
-            "ANSIBLE_CONFIG=/workspace/ansible/ansible.cfg",
+            "ANSIBLE_CONFIG=/opt/ansible-deploy/ansible/ansible.cfg",
             "ansible-deploy:local",
-            f"ansible/playbooks/{playbook}",
+            f"/opt/ansible-deploy/ansible/playbooks/{playbook}",
             "-i",
-            self._container_path(inventory),
+            "/run/config/inventory.yml",
             "--private-key",
             "/run/secrets/ssh_key",
             "--ssh-common-args",
@@ -146,9 +159,6 @@ class AnsibleRunner:
         if self.verbose:
             args.append("-vv")
         self._run(args, exit_code=exit_code, stdin_text=password_stdin)
-
-    def _container_path(self, path: Path) -> str:
-        return "/workspace/" + path.resolve().relative_to(self.repo).as_posix()
 
     def _run(
         self,
@@ -248,6 +258,63 @@ def _fingerprint(known_host_line: str) -> str:
         raise RunnerError("ssh-keyscan returned an invalid public key", 3) from exc
     digest = base64.b64encode(hashlib.sha256(raw).digest()).decode("ascii").rstrip("=")
     return f"SHA256:{digest}"
+
+
+def runtime_resources() -> Traversable:
+    """Return the runtime tree shipped in both wheels and editable installs."""
+    return resources.files("deploy_cli").joinpath("runtime")
+
+
+def _is_reparse_path(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    try:
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+    except (FileNotFoundError, OSError):
+        return False
+    return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def deployment_state_dir(project_dir: Path, environment: str) -> Path:
+    project = project_dir.resolve()
+    state_root = project / ".deploy-state"
+    state_dir = state_root / environment
+    for path in (state_root, state_dir):
+        if _is_reparse_path(path):
+            raise RunnerError("Deployment state path cannot be a symlink or reparse point", 2)
+        try:
+            path.resolve(strict=False).relative_to(project)
+        except ValueError as exc:
+            raise RunnerError("Deployment state path escapes the project directory", 2) from exc
+    return state_dir
+
+
+def prepare_state_directory(project_dir: Path, environment: str) -> Path:
+    state_dir = deployment_state_dir(project_dir, environment)
+    state_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    deployment_state_dir(project_dir, environment)
+    state_dir.parent.chmod(0o700)
+    state_dir.mkdir(mode=0o700, exist_ok=True)
+    state_dir = deployment_state_dir(project_dir, environment)
+    state_dir.chmod(0o700)
+    return state_dir
+
+
+def _copy_resource_tree(source: Traversable, destination: Path) -> None:
+    """Materialize only packaged runtime assets into an ephemeral Docker context."""
+    if not source.is_dir():
+        raise RunnerError("Packaged Ansible runtime assets are missing", 5)
+    destination.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        target = destination / item.name
+        if item.is_dir():
+            _copy_resource_tree(item, target)
+        elif item.is_file():
+            with item.open("rb") as source_stream, target.open("wb") as target_stream:
+                shutil.copyfileobj(source_stream, target_stream)
 
 
 def ansible_vars(

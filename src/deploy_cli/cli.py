@@ -15,6 +15,7 @@ from .config import (
     validate_production_isolation,
     validate_registry_auth,
 )
+from .images import publish_images
 from .keys import ensure_deploy_key
 from .models import EnvironmentConfig, GlobalConfig
 from .redaction import Redactor, secrets_from_env
@@ -56,6 +57,15 @@ def _parser() -> argparse.ArgumentParser:
     rollback_parser = sub.add_parser("rollback", help="Roll back Production application/config")
     rollback_parser.add_argument("environment", choices=["prod"])
     rollback_parser.add_argument("--yes", action="store_true")
+    images = sub.add_parser("images", help="Build and publish application images")
+    images_sub = images.add_subparsers(dest="images_command", required=True)
+    publish = images_sub.add_parser("publish", help="Publish images and pin Compose digests")
+    publish.add_argument("environment", choices=["stage", "prod"])
+    publish.add_argument("--registry", required=True, choices=["ghcr", "dockerhub"])
+    publish.add_argument("--namespace", required=True)
+    publish.add_argument("--username")
+    publish.add_argument("--ask-token", action="store_true")
+    publish.add_argument("--tag", help="image tag (defaults to application Git SHA)")
     return parser
 
 
@@ -131,6 +141,20 @@ def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     project_dir = args.project_dir.resolve()
     try:
+        if args.command == "images":
+            published = publish_images(
+                project_dir,
+                args.environment,
+                registry=args.registry,
+                namespace=args.namespace,
+                username=args.username,
+                ask_token=args.ask_token,
+                tag=args.tag,
+            )
+            for image in published:
+                print(f"[IMAGE] {image.service}: {image.immutable_reference}")
+            print(f"[OK] Published {len(published)} images and updated {args.environment} Compose")
+            return 0
         if (
             args.command in {"stage", "prod"}
             and args.ask_bootstrap_password

@@ -1,0 +1,16 @@
+---
+schema_version: 1
+services:
+  backend:
+    context: backend
+    dockerfile: Dockerfile
+    image: demo-backend
+  frontend:
+    context: frontend
+    dockerfile: Dockerfile
+    image: demo-frontend
+environments:
+  stage:
+    compose: deploy/compose.stage.yml
+  prod:
+    compose: deploy/compose.prod.yml

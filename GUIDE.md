@@ -26,6 +26,15 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
 
 ## Установка
 
+Рекомендуется отдельный venv (либо `pipx`), чтобы версии Pydantic/PyYAML CLI не
+конфликтовали с глобальными Python-пакетами:
+
+```powershell
+python -m venv .venv-deploy
+.\.venv-deploy\Scripts\Activate.ps1
+python -m pip install "ansible-deploy @ git+https://github.com/Daniil-Danone/ansible-deploy.git@develop"
+```
+
 Из GitHub `develop`:
 
 ```powershell
@@ -87,6 +96,7 @@ Copy-Item .deploy\environments\stage\.env.example .deploy\environments\stage\app
 .deploy/keys/
 .deploy/environments/*/app.env
 .deploy/environments/*/registry-auth.json
+*.ansible-deploy.lock
 ```
 
 ## Конфигурация
@@ -171,6 +181,36 @@ docker buildx imagetools inspect ghcr.io/OWNER/demo-frontend:TAG
 ```yaml
 image: ghcr.io/OWNER/demo-backend@sha256:<64 hex>
 ```
+
+Проще использовать встроенный publisher. `.deploy/images.yml` сопоставляет Compose
+services с локальными build contexts и Stage/Production Compose. GHCR:
+
+```powershell
+deploy images publish stage --registry ghcr --namespace OWNER --username OWNER --ask-token
+```
+
+Docker Hub:
+
+```powershell
+deploy images publish stage --registry dockerhub --namespace USER --username USER --ask-token
+```
+
+Токен вводится скрыто и передаётся только `docker login --password-stdin`. Для CI
+поддерживаются `GHCR_TOKEN` (или `GITHUB_TOKEN`) + `GHCR_USERNAME` (или `GITHUB_ACTOR`),
+а также `DOCKERHUB_TOKEN` + `DOCKERHUB_USERNAME`. Если credentials не переданы, CLI
+использует уже выполненный `docker login`. `--username` без `--ask-token` требует token
+env var. `--tag` переопределяет default Git SHA.
+
+К базовому тегу CLI добавляет случайный per-run suffix: конкурентный publisher не может
+подменить mutable tag между push и проверкой. Digest берётся из результата `docker push`,
+а registry затем проверяется по immutable `repository@digest`, не по тегу.
+
+CLI сначала собирает и публикует **все** images, затем проверяет digest каждого через
+registry и только после успеха всех services атомарно обновляет выбранный Compose на
+`repository@sha256:...`. При ошибке Compose не меняется. Build contexts и Dockerfiles
+обязаны находиться внутри project root; исходники по-прежнему не отправляются на VPS.
+Обновляются только строки `image:` нужных services: комментарии и остальные YAML scalar
+сохраняются byte-for-byte. Anchors, aliases и merge keys в целевом Compose отклоняются.
 
 Для private registry сохраните Docker config JSON в ignored-файл и добавьте в config:
 

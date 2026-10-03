@@ -272,8 +272,8 @@ def _is_reparse_path(path: Path) -> bool:
     if is_junction is not None and is_junction():
         return True
     try:
-        attributes = path.lstat().st_file_attributes
-    except (AttributeError, FileNotFoundError, OSError):
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+    except (FileNotFoundError, OSError):
         return False
     return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
 

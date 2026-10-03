@@ -2,3 +2,4 @@
 .deploy/keys/
 .deploy/environments/*/app.env
 .deploy/environments/*/registry-auth.json
+*.ansible-deploy.lock

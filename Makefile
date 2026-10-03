@@ -1,4 +1,5 @@
-.PHONY: test lint typecheck ansible-lint yaml-lint syntax-check integration-test check
+.PHONY: test lint typecheck ansible-lint yaml-lint syntax-check alloy-validate \
+	integration-test check
 
 test:
 	python -m pytest
@@ -17,9 +18,13 @@ yaml-lint:
 
 syntax-check:
 	for playbook in bootstrap verify_deploy_access guard_environment site update health \
-		finalize_release abort_release rollback; do \
+		finalize_release abort_release rollback monitoring monitoring_update \
+		monitoring_status collector collector_status; do \
 		ansible-playbook ansible/playbooks/$$playbook.yml --syntax-check -i tests/fixtures/inventory.yml; \
 	done
+
+alloy-validate:
+	python scripts/validate_alloy.py
 
 integration-test:
 	python -m pytest docker_tests
@@ -31,4 +36,4 @@ integration-test:
 			tests/integration/$$playbook.yml -i localhost, -v; \
 	done
 
-check: test lint typecheck yaml-lint ansible-lint syntax-check
+check: test lint typecheck yaml-lint ansible-lint syntax-check alloy-validate

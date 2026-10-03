@@ -26,6 +26,8 @@ digest, подготавливает сервер, включает HTTPS и з�
 - приватные registry с отдельным read-only токеном сервера;
 - digest-pinned Production, проверка DNS/SSH host key/Compose/env;
 - обновление управляемого состояния сервера и откат приложения Production.
+- отдельный monitoring VPS с Grafana/Loki и Alloy-сборщиками Docker/journald;
+- HTTPS для Grafana, authenticated HTTPS Loki push и закрытые raw-порты.
 
 ## Поддерживаемая матрица
 
@@ -34,7 +36,7 @@ digest, подготавливает сервер, включает HTTPS и з�
 | Рабочая машина | Windows, macOS, Ubuntu; Python 3.12+, Git, Docker, OpenSSH |
 | Целевой сервер | отдельный чистый Ubuntu 24.04 VPS |
 | Registry | private/public GHCR и Docker Hub |
-| Окружения | Stage и изолированный Production |
+| Окружения | Stage, изолированный Production и отдельный Monitoring |
 | Application | один Compose-проект, один домен, upstream `127.0.0.1:8080` |
 
 ## Границы проекта
@@ -67,7 +69,7 @@ multi-host/rolling/zero-downtime deploy, очистку старых релиз�
 - Практика: [demo-app](docs/guides/demo-app.md),
   [настоящий проект](docs/guides/real-project.md),
   [приватные registry](docs/guides/private-registries.md),
-  [Production](docs/guides/production.md)
+  [Production](docs/guides/production.md), [централизованные логи](docs/guides/monitoring.md)
 - Концепции: [как всё работает](docs/concepts/how-it-works.md),
   [SSH и ключи](docs/concepts/ssh-and-keys.md),
   [состояние сервера](docs/concepts/server-state.md)

@@ -24,5 +24,6 @@ jobs:
       - run: yamllint .
       - run: ansible-lint ansible
       - run: make syntax-check
+      - run: make alloy-validate
       - run: docker build -t ansible-deploy:ci .
       - run: docker tag ansible-deploy:ci ansible-deploy:local && make integration-test

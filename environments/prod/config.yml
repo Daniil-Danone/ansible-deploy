@@ -19,6 +19,10 @@ application:
   remote_dir: /srv/myapp-prod
   allowed_loopback_ports: [8080]
   required_env_vars: [APP_ENV]
+collector:
+  push_url: https://grafana.example.com/loki/api/v1/push
+  username: alloy
+  password_file: environments/prod/collector.password
 domain: example.com
 acme_email: ops@example.com
 health_path: /health

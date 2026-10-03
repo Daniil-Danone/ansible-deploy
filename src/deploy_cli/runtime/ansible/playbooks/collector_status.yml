@@ -1,0 +1,15 @@
+---
+- name: Verify the independent log collector
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Inspect Alloy collector container
+      community.docker.docker_container_info:
+        name: ansible-deploy-alloy
+      register: alloy_container
+    - name: Require Alloy collector to be running
+      ansible.builtin.assert:
+        that:
+          - alloy_container.exists
+          - alloy_container.container.State.Status == 'running'

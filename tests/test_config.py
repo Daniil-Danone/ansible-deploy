@@ -12,10 +12,11 @@ from deploy_cli.config import (
     load_configuration,
     validate_compose,
     validate_environment_file,
+    validate_observability_inputs,
     validate_production_isolation,
     validate_registry_auth,
 )
-from deploy_cli.models import EnvironmentConfig, GlobalConfig
+from deploy_cli.models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from deploy_cli.secret_file import secure_secret_permissions
 
 
@@ -31,7 +32,41 @@ def test_checked_in_configuration_has_supported_schema() -> None:
 
 def test_unknown_environment_is_rejected() -> None:
     with pytest.raises(ConfigurationError, match="not implemented"):
-        load_configuration(Path.cwd(), "monitoring")
+        load_configuration(Path.cwd(), "development")
+
+
+def test_checked_in_monitoring_configuration_is_supported() -> None:
+    repo = Path(__file__).parents[1]
+
+    _, monitoring = load_configuration(repo, "monitoring")
+
+    assert monitoring.environment == "monitoring"
+    assert monitoring.monitoring.retention_days == 30
+
+
+def test_monitoring_and_collector_secret_contracts_are_validated(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    _, monitoring = load_configuration(repo, "monitoring")
+    monitoring_secret = tmp_path / "monitoring.env"
+    monitoring_secret.write_text(
+        "GF_SECURITY_ADMIN_USER=admin\n"
+        "GF_SECURITY_ADMIN_PASSWORD=synthetic-admin-password\n"
+        "LOKI_PUSH_USERNAME=alloy\n"
+        "LOKI_PUSH_PASSWORD_HASH=$6$synthetic-hash\n",
+        encoding="utf-8",
+    )
+    secure_secret_permissions(monitoring_secret)
+    monitoring.monitoring.secrets_file = monitoring_secret
+
+    _, stage = load_configuration(repo, "stage")
+    collector_secret = tmp_path / "collector.password"
+    collector_secret.write_text("synthetic-push-password\n", encoding="utf-8")
+    secure_secret_permissions(collector_secret)
+    assert stage.collector is not None
+    stage.collector.password_file = collector_secret
+
+    validate_observability_inputs(monitoring)
+    validate_observability_inputs(stage)
 
 
 def test_checked_in_production_configuration_is_isolated() -> None:
@@ -109,6 +144,111 @@ def test_unsafe_remote_directory_is_rejected(path: str) -> None:
 
     with pytest.raises(ValidationError, match="normalized"):
         EnvironmentConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    "push_url",
+    [
+        "http://grafana.example.com/loki/api/v1/push",
+        "https://user:secret@grafana.example.com/loki/api/v1/push",
+        "https://grafana.example.com/loki/api/v1/push?tenant=one",
+        "https://grafana.example.com/loki/api/v1/push?",
+        "https://grafana.example.com/loki/api/v1/push#fragment",
+        "https://grafana.example.com/loki/api/v1/push#",
+        " https://grafana.example.com/loki/api/v1/push",
+        "https://grafana.example.com/loki/api/v1/push ",
+        "https://grafana.example.com/loki/api/v1/push/extra",
+        "https://grafana.example.com:70000/loki/api/v1/push",
+        "https://grafana.example.com:/loki/api/v1/push",
+        "https:///loki/api/v1/push",
+    ],
+)
+def test_collector_push_url_rejects_noncanonical_or_credentialed_urls(
+    push_url: str,
+) -> None:
+    raw = yaml.safe_load(
+        (Path(__file__).parents[1] / "environments/stage/config.yml").read_text()
+    )
+    raw["collector"]["push_url"] = push_url
+
+    with pytest.raises(ValidationError, match="push_url") as raised:
+        EnvironmentConfig.model_validate(raw)
+
+    assert "user:secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "push_url",
+    [
+        "https://grafana.example.com/loki/api/v1/push",
+        "https://grafana.example.com:8443/loki/api/v1/push",
+        "https://192.0.2.30/loki/api/v1/push",
+        "https://[2001:db8::30]:8443/loki/api/v1/push",
+    ],
+)
+def test_collector_push_url_accepts_only_structured_https_authorities(push_url: str) -> None:
+    raw = yaml.safe_load(
+        (Path(__file__).parents[1] / "environments/stage/config.yml").read_text()
+    )
+    raw["collector"]["push_url"] = push_url
+
+    assert EnvironmentConfig.model_validate(raw).collector.push_url == push_url  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    ("field", "remote_dir"),
+    [
+        ("application", "/"),
+        ("application", "/etc/app"),
+        ("collector", "/opt"),
+        ("collector", "/var/lib/alloy"),
+        ("collector", "/srv/../etc/alloy"),
+    ],
+)
+def test_managed_remote_directories_reject_system_roots(
+    field: str, remote_dir: str
+) -> None:
+    raw = yaml.safe_load(
+        (Path(__file__).parents[1] / "environments/stage/config.yml").read_text()
+    )
+    raw[field]["remote_dir"] = remote_dir
+
+    with pytest.raises(ValidationError, match="dedicated directory"):
+        EnvironmentConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("app_dir", "collector_dir"),
+    [
+        ("/srv/myapp", "/srv/myapp"),
+        ("/srv/myapp", "/srv/myapp/alloy"),
+        ("/srv/myapp/runtime", "/srv/myapp"),
+    ],
+)
+def test_collector_remote_directory_cannot_overlap_application(
+    app_dir: str, collector_dir: str
+) -> None:
+    raw = yaml.safe_load(
+        (Path(__file__).parents[1] / "environments/stage/config.yml").read_text()
+    )
+    raw["application"]["remote_dir"] = app_dir
+    raw["collector"]["remote_dir"] = collector_dir
+
+    with pytest.raises(ValidationError, match="must not equal, contain or be contained"):
+        EnvironmentConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize("remote_dir", ["/", "/opt", "/etc/monitoring", "/srv/../etc"])
+def test_monitoring_remote_directory_requires_dedicated_opt_or_srv_leaf(
+    remote_dir: str,
+) -> None:
+    raw = yaml.safe_load(
+        (Path(__file__).parents[1] / "environments/monitoring/config.yml").read_text()
+    )
+    raw["monitoring"]["remote_dir"] = remote_dir
+
+    with pytest.raises(ValidationError, match="dedicated directory"):
+        MonitoringConfig.model_validate(raw)
 
 
 def test_unknown_timezone_is_rejected() -> None:

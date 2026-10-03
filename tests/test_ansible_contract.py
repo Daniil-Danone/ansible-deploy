@@ -165,3 +165,44 @@ def test_disabled_hardening_controls_have_explicit_off_state() -> None:
     fail2ban = by_name["Stop and disable fail2ban when explicitly configured off"]
     assert fail2ban["ansible.builtin.service"]["enabled"] is False  # type: ignore[index]
     assert fail2ban["ansible.builtin.service"]["state"] == "stopped"  # type: ignore[index]
+
+
+def test_monitoring_contract_has_retention_provisioning_tls_and_no_raw_public_ports() -> None:
+    monitoring = _text("ansible/roles/monitoring/tasks/main.yml")
+
+    assert "retention_enabled: true" in monitoring
+    assert "retention_period: {{ monitoring_retention_days }}d" in monitoring
+    assert "url: http://loki:3100" in monitoring
+    assert "central-logs" in monitoring
+    assert "environment=~" in monitoring and "service=~" in monitoring
+    assert '127.0.0.1:{{ monitoring_loki_port }}:3100' in monitoring
+    assert '127.0.0.1:{{ monitoring_grafana_port }}:3000' in monitoring
+    assert '"0.0.0.0:' not in monitoring
+    assert "ssl_protocols TLSv1.2 TLSv1.3" in monitoring
+    assert "auth_basic_user_file" in monitoring
+    assert "location = /loki/api/v1/push" in monitoring
+    assert "mode: \"0600\"" in monitoring
+    assert "no_log: true" in monitoring
+
+
+def test_collector_contract_has_bounded_labels_docker_journald_and_no_ports() -> None:
+    tasks = _text("ansible/roles/collector/tasks/main.yml")
+    config = _text("ansible/roles/collector/templates/config.alloy.j2")
+
+    for label in ("environment", "service", "container", "host", "level"):
+        assert label in config
+    assert "discovery.docker" in config
+    assert "loki.source.docker" in config
+    assert "loki.source.journal" in config
+    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in tasks
+    assert "/var/log/journal:/var/log/journal:ro" in tasks
+    assert "password_file = \"/run/secrets/push.password\"" in config
+    assert "ports:" not in tasks
+
+
+def test_observability_playbooks_are_separate_from_application_release_flow() -> None:
+    for playbook in ("monitoring.yml", "monitoring_update.yml", "collector.yml"):
+        content = _text(f"ansible/playbooks/{playbook}")
+        assert "role: application" not in content
+        assert "release_finalize" not in content
+        assert "release_restore" not in content

@@ -6,13 +6,13 @@ import os
 import re
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, overload
 
 import yaml
 from dotenv import dotenv_values
 from pydantic import BaseModel, ValidationError
 
-from .models import EnvironmentConfig, GlobalConfig
+from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .secret_file import SecretFileError, validate_secret_permissions
 
 
@@ -105,21 +105,76 @@ def _reject_registry_auth_collisions(
         )
 
 
+def _reject_secret_collisions(path: Path, protected: dict[str, Path], *, field: str) -> None:
+    canonical = path.resolve(strict=False)
+    collisions = [
+        label
+        for label, candidate in protected.items()
+        if canonical == candidate.resolve(strict=False)
+    ]
+    if collisions:
+        raise ConfigurationError(f"{field} file collides with protected " + ", ".join(collisions))
+
+
+@overload
+def load_configuration(
+    project_dir: Path, environment: Literal["stage", "prod"]
+) -> tuple[GlobalConfig, EnvironmentConfig]: ...
+
+
+@overload
+def load_configuration(
+    project_dir: Path, environment: Literal["monitoring"]
+) -> tuple[GlobalConfig, MonitoringConfig]: ...
+
+
+@overload
 def load_configuration(
     project_dir: Path, environment: str
-) -> tuple[GlobalConfig, EnvironmentConfig]:
-    if environment not in {"stage", "prod"}:
+) -> tuple[GlobalConfig, EnvironmentConfig | MonitoringConfig]: ...
+
+
+def load_configuration(
+    project_dir: Path, environment: str
+) -> tuple[GlobalConfig, EnvironmentConfig | MonitoringConfig]:
+    if environment not in {"stage", "prod", "monitoring"}:
         raise ConfigurationError(f"Environment is not implemented yet: {environment}")
     project_dir = project_dir.resolve()
     config_root = _configuration_root(project_dir)
     global_config = _load_yaml(config_root / "config/global.yml", GlobalConfig)
     env_path = config_root / "environments" / environment / "config.yml"
-    env_config = _load_yaml(env_path, EnvironmentConfig)
+    env_config: EnvironmentConfig | MonitoringConfig
+    if environment == "monitoring":
+        env_config = _load_yaml(env_path, MonitoringConfig)
+    else:
+        env_config = _load_yaml(env_path, EnvironmentConfig)
     if env_config.environment != environment:
         raise ConfigurationError(
             f"Configuration environment mismatch: requested {environment!r}, "
             f"file declares {env_config.environment!r}"
         )
+    if isinstance(env_config, MonitoringConfig):
+        env_config.monitoring.secrets_file = _project_secret_path(
+            project_dir, env_config.monitoring.secrets_file, field="monitoring secrets"
+        )
+        env_config.server.ssh_key = _project_key_path(
+            project_dir, env_config.server.ssh_key, field="SSH private key"
+        )
+        env_config.server.public_key = _project_key_path(
+            project_dir, env_config.server.public_key, field="SSH public key"
+        )
+        _reject_secret_collisions(
+            env_config.monitoring.secrets_file,
+            {
+                "SSH private key": env_config.server.ssh_key,
+                "SSH public key": env_config.server.public_key,
+                "global config": config_root / "config/global.yml",
+                "environment config": env_path,
+                "README": project_dir / "README.md",
+            },
+            field="Monitoring secret",
+        )
+        return global_config, env_config
     app = env_config.application
     app.compose = _project_application_path(project_dir, app.compose, field="Compose")
     app.env_file = _project_application_path(
@@ -135,12 +190,71 @@ def load_configuration(
     env_config.server.public_key = _project_key_path(
         project_dir, env_config.server.public_key, field="SSH public key"
     )
+    if env_config.collector is not None:
+        env_config.collector.password_file = _project_secret_path(
+            project_dir, env_config.collector.password_file, field="collector password"
+        )
+        _reject_secret_collisions(
+            env_config.collector.password_file,
+            {
+                "Compose": app.compose,
+                "environment file": app.env_file,
+                "registry authentication": app.registry_auth_file or Path("/__absent__"),
+                "SSH private key": env_config.server.ssh_key,
+                "SSH public key": env_config.server.public_key,
+                "global config": config_root / "config/global.yml",
+                "environment config": env_path,
+                "README": project_dir / "README.md",
+            },
+            field="Collector password",
+        )
     _reject_registry_auth_collisions(project_dir, config_root, env_path, env_config)
     return global_config, env_config
 
 
+def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) -> None:
+    secret = (
+        config.monitoring.secrets_file
+        if isinstance(config, MonitoringConfig)
+        else config.collector.password_file if config.collector is not None else None
+    )
+    if secret is None:
+        raise ConfigurationError(f"{config.environment} collector is not configured")
+    if not secret.is_file():
+        raise ConfigurationError(f"Required secret file is missing: {secret}")
+    try:
+        validate_secret_permissions(secret)
+    except (OSError, SecretFileError) as exc:
+        raise ConfigurationError("Observability secret permissions are not restrictive") from exc
+    try:
+        if isinstance(config, MonitoringConfig):
+            values = dotenv_values(secret)
+            required = {
+                "GF_SECURITY_ADMIN_USER",
+                "GF_SECURITY_ADMIN_PASSWORD",
+                "LOKI_PUSH_USERNAME",
+                "LOKI_PUSH_PASSWORD_HASH",
+            }
+            missing = sorted(name for name in required if not values.get(name))
+            if missing:
+                raise ConfigurationError(
+                    "Monitoring secret file is missing variables: " + ", ".join(missing)
+                )
+            password_hash = values["LOKI_PUSH_PASSWORD_HASH"]
+            if not isinstance(password_hash, str) or not password_hash.startswith("$6$"):
+                raise ConfigurationError("LOKI_PUSH_PASSWORD_HASH must be a crypt SHA-512 hash")
+        else:
+            password = secret.read_text(encoding="utf-8").rstrip("\r\n")
+            if not password or "\n" in password or "\r" in password or "\0" in password:
+                raise ConfigurationError("Collector password file must contain one non-empty line")
+    except ConfigurationError:
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ConfigurationError("Observability secret file is invalid") from exc
+
+
 def validate_local_inputs(
-    config: EnvironmentConfig,
+    config: EnvironmentConfig | MonitoringConfig,
     *,
     require_ssh: bool = True,
     require_public_key: bool = True,
@@ -151,7 +265,7 @@ def validate_local_inputs(
         required.append(config.server.ssh_key)
     if require_public_key:
         required.append(config.server.public_key)
-    if require_application:
+    if require_application and isinstance(config, EnvironmentConfig):
         required.extend([config.application.compose, config.application.env_file])
         if config.application.registry_auth_file is not None:
             required.append(config.application.registry_auth_file)

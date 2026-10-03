@@ -16,6 +16,10 @@ application:
   env_file: environments/stage/stage.env
   remote_dir: /srv/myapp
   allowed_loopback_ports: [8080]
+collector:
+  push_url: https://grafana.example.com/loki/api/v1/push
+  username: alloy
+  password_file: environments/stage/collector.password
 domain: stage.example.com
 acme_email: ops@example.com
 health_path: /health

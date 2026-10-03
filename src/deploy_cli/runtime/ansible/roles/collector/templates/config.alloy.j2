@@ -1,0 +1,131 @@
+discovery.docker "local" {
+	host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+	targets = discovery.docker.local.targets
+
+	rule {
+		target_label = "environment"
+		replacement  = "{{ app_environment }}"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+
+	rule {
+		target_label = "host"
+		replacement  = "{{ ansible_hostname }}"
+	}
+}
+
+loki.process "docker_level" {
+	forward_to = [loki.write.central.receiver]
+
+	// Supported application contract: JSON or logfmt with a field named "level".
+	stage.json {
+		expressions = {
+			level = "level",
+		}
+	}
+
+	stage.logfmt {
+		mapping = {
+			level = "level",
+		}
+	}
+
+	stage.template {
+		source   = "level"
+		template = "{% raw %}{{- $v := ToUpper .Value -}}{{- if eq $v \"DEBUG\" -}}DEBUG{{- else if eq $v \"INFO\" -}}INFO{{- else if or (eq $v \"WARN\") (eq $v \"WARNING\") -}}WARNING{{- else if eq $v \"ERROR\" -}}ERROR{{- else if or (eq $v \"CRIT\") (eq $v \"CRITICAL\") (eq $v \"FATAL\") -}}CRITICAL{{- end -}}{% endraw %}"
+	}
+
+	stage.labels {
+		values = {
+			level = "level",
+		}
+	}
+}
+
+loki.source.docker "containers" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.containers.output
+	forward_to = [loki.process.docker_level.receiver]
+}
+
+loki.relabel "journal" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		regex         = "(.+)"
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		regex         = "emerg|alert|crit"
+		target_label  = "level"
+		replacement   = "CRITICAL"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		regex         = "err|error"
+		target_label  = "level"
+		replacement   = "ERROR"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		regex         = "warning|warn"
+		target_label  = "level"
+		replacement   = "WARNING"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		regex         = "notice|info"
+		target_label  = "level"
+		replacement   = "INFO"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		regex         = "debug"
+		target_label  = "level"
+		replacement   = "DEBUG"
+	}
+}
+
+loki.source.journal "system" {
+	// Empty path intentionally lets Alloy discover both /run/log/journal and
+	// /var/log/journal, which are mounted read-only into the container.
+	relabel_rules = loki.relabel.journal.rules
+	labels        = {
+		environment = "{{ app_environment }}",
+		service     = "journald",
+		container   = "system",
+		host        = "{{ ansible_hostname }}",
+	}
+	forward_to = [loki.write.central.receiver]
+}
+
+loki.write "central" {
+	endpoint {
+		url = "{{ collector_push_url }}"
+
+		basic_auth {
+			username      = "{{ collector_username }}"
+			password_file = "/run/secrets/push.password"
+		}
+	}
+}

@@ -110,9 +110,10 @@ def test_server_update_all_is_ordered_and_reports_failure(monkeypatch) -> None:
             raise RunnerError("prod failed", 5)
 
     monkeypatch.setattr(cli, "update_server", update)
+    monkeypatch.setattr(cli, "update_monitoring", update)
 
     assert run(["server", "update", "all", "--yes"]) == 5
-    assert calls == ["stage", "prod"]
+    assert calls == ["stage", "prod", "monitoring"]
 
 
 def test_server_update_all_attempts_prod_after_stage_failure(monkeypatch) -> None:
@@ -127,9 +128,43 @@ def test_server_update_all_attempts_prod_after_stage_failure(monkeypatch) -> Non
             raise RunnerError("stage failed", 5)
 
     monkeypatch.setattr(cli, "update_server", update)
+    monkeypatch.setattr(cli, "update_monitoring", update)
 
     assert run(["server", "update", "all", "--yes"]) == 5
+    assert calls == ["stage", "prod", "monitoring"]
+
+
+def test_collectors_all_is_ordered_and_aggregates_after_errors(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
+
+    def reconcile(repo, global_config, config, runner, **kwargs):
+        calls.append(config.environment)
+        if config.environment == "stage":
+            raise RunnerError("stage collector failed", 6)
+
+    monkeypatch.setattr(cli, "deploy_collector", reconcile)
+
+    assert run(["collectors", "update", "all", "--yes"]) == 6
     assert calls == ["stage", "prod"]
+
+
+def test_monitoring_status_dispatches_without_application_release(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
+    monkeypatch.setattr(
+        cli, "monitoring_status", lambda config: calls.append(config.environment)
+    )
+    monkeypatch.setattr(
+        cli, "deploy", lambda *args, **kwargs: pytest.fail("application release was called")
+    )
+
+    assert run(["monitoring", "status"]) == 0
+    assert calls == ["monitoring"]
 
 
 def test_rollback_failure_keeps_rollback_exit_code(monkeypatch) -> None:

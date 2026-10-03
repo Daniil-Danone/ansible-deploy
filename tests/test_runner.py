@@ -462,3 +462,49 @@ def test_runtime_rejects_fifo_source_without_blocking(
 
     assert source.exists()
     assert not destination.exists()
+
+
+def test_observability_secret_is_file_mounted_without_content_in_argv_or_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    state = project / ".deploy-state/stage"
+    state.mkdir(parents=True)
+    inventory = state / "managed.yml"
+    inventory.write_text("all: {}\n", encoding="utf-8")
+    key = project / "key"
+    key.write_text("private\n", encoding="utf-8")
+    secret = project / "collector.password"
+    secret_value = "synthetic-observability-secret"  # noqa: S105
+    secret.write_text(secret_value, encoding="utf-8")
+    commands: list[list[str]] = []
+    environments: list[dict[str, str]] = []
+
+    class Process:
+        stdout = StringIO()
+        stdin = None
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait(timeout=None) -> int:
+            del timeout
+            return 0
+
+    def popen(args, **kwargs):
+        commands.append(args)
+        environments.append(kwargs["env"])
+        return Process()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    runner = AnsibleRunner(project, Redactor([secret_value]))
+    runner.playbook(
+        "collector.yml", inventory, {}, key, observability_secret_file=secret
+    )
+
+    command = commands[0]
+    assert f"{secret}:/run/secrets/observability:ro" in command
+    assert secret_value not in command
+    assert secret_value not in environments[0].values()

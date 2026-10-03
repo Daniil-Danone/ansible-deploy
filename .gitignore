@@ -7,6 +7,7 @@ __pycache__/
 *.env
 !.env.example
 *.vault-password
+*.password
 *.pem
 *.key
 secrets/

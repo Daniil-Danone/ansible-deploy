@@ -16,6 +16,10 @@ application:
   registry_auth_file: .deploy/environments/stage/registry-auth.json
   remote_dir: /srv/demo-stage
   allowed_loopback_ports: [8080]
+collector:
+  push_url: https://grafana.example.com/loki/api/v1/push
+  username: alloy
+  password_file: .deploy/environments/stage/collector.password
 domain: stage.example.com
 acme_email: ops@example.com
 health_path: /health

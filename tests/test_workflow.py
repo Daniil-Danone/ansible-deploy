@@ -6,7 +6,14 @@ import pytest
 
 from deploy_cli.config import load_configuration
 from deploy_cli.runner import RunnerError
-from deploy_cli.workflow import deploy, deployment_manifest, dns_preflight, write_inventory
+from deploy_cli.workflow import (
+    deploy,
+    deploy_collector,
+    deploy_monitoring,
+    deployment_manifest,
+    dns_preflight,
+    write_inventory,
+)
 
 
 def test_repeat_deploy_uses_only_managed_access(tmp_path: Path) -> None:
@@ -420,3 +427,36 @@ def test_recovery_failure_keeps_original_exit_code_and_reports_both(tmp_path: Pa
 
     assert raised.value.exit_code == 7
     assert "recovery also failed" in str(raised.value)
+
+
+def test_monitoring_deploy_uses_dedicated_order_without_release_playbooks() -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "monitoring")
+    runner = Mock()
+
+    deploy_monitoring(repo, global_config, config, runner, dry_run=False)
+
+    names = [call.args[0] for call in runner.playbook.call_args_list]
+    assert names == [
+        "verify_deploy_access.yml",
+        "guard_environment.yml",
+        "monitoring.yml",
+        "monitoring_status.yml",
+    ]
+    assert not {"site.yml", "abort_release.yml", "finalize_release.yml"}.intersection(names)
+    monitoring = runner.playbook.call_args_list[2]
+    assert monitoring.kwargs["observability_secret_file"] == config.monitoring.secrets_file
+
+
+def test_collector_deploy_guards_identity_then_reconciles_and_verifies() -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    runner = Mock()
+
+    deploy_collector(repo, global_config, config, runner, dry_run=False)
+
+    names = [call.args[0] for call in runner.playbook.call_args_list]
+    assert names == ["guard_environment.yml", "collector.yml", "collector_status.yml"]
+    collector = runner.playbook.call_args_list[1]
+    assert config.collector is not None
+    assert collector.kwargs["observability_secret_file"] == config.collector.password_file

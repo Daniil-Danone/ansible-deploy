@@ -1,3 +1,5 @@
+import base64
+import binascii
 import ipaddress
 import json
 import os
@@ -11,6 +13,7 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, ValidationError
 
 from .models import EnvironmentConfig, GlobalConfig
+from .secret_file import SecretFileError, validate_secret_permissions
 
 
 class ConfigurationError(ValueError):
@@ -61,6 +64,47 @@ def _project_key_path(project_dir: Path, configured: Path, *, field: str) -> Pat
     return lexical
 
 
+def _project_secret_path(project_dir: Path, configured: Path, *, field: str) -> Path:
+    lexical = Path(
+        os.path.abspath(project_dir / configured if not configured.is_absolute() else configured)
+    )
+    try:
+        lexical.resolve(strict=False).relative_to(project_dir)
+    except ValueError as exc:
+        raise ConfigurationError(f"{field} path must stay inside the project directory") from exc
+    return lexical
+
+
+def _reject_registry_auth_collisions(
+    project_dir: Path,
+    config_root: Path,
+    environment_config: Path,
+    config: EnvironmentConfig,
+) -> None:
+    auth = config.application.registry_auth_file
+    if auth is None:
+        return
+    auth_canonical = auth.resolve(strict=False)
+    protected = {
+        "Compose": config.application.compose.resolve(strict=False),
+        "environment file": config.application.env_file.resolve(strict=False),
+        "SSH private key": config.server.ssh_key.resolve(strict=False),
+        "SSH public key": config.server.public_key.resolve(strict=False),
+        "global config": (config_root / "config/global.yml").resolve(strict=False),
+        "environment config": environment_config.resolve(strict=False),
+        "image publishing config": (project_dir / ".deploy/images.yml").resolve(
+            strict=False
+        ),
+        "README": (project_dir / "README.md").resolve(strict=False),
+        "GUIDE": (project_dir / "GUIDE.md").resolve(strict=False),
+    }
+    collisions = [label for label, path in protected.items() if path == auth_canonical]
+    if collisions:
+        raise ConfigurationError(
+            "Registry authentication file collides with protected " + ", ".join(collisions)
+        )
+
+
 def load_configuration(
     project_dir: Path, environment: str
 ) -> tuple[GlobalConfig, EnvironmentConfig]:
@@ -82,7 +126,7 @@ def load_configuration(
         project_dir, app.env_file, field="environment file"
     )
     if app.registry_auth_file is not None:
-        app.registry_auth_file = _project_application_path(
+        app.registry_auth_file = _project_secret_path(
             project_dir, app.registry_auth_file, field="registry authentication"
         )
     env_config.server.ssh_key = _project_key_path(
@@ -91,6 +135,7 @@ def load_configuration(
     env_config.server.public_key = _project_key_path(
         project_dir, env_config.server.public_key, field="SSH public key"
     )
+    _reject_registry_auth_collisions(project_dir, config_root, env_path, env_config)
     return global_config, env_config
 
 
@@ -187,7 +232,9 @@ def validate_environment_file(config: EnvironmentConfig) -> None:
         )
 
 
-def validate_registry_auth(config: EnvironmentConfig) -> None:
+def validate_registry_auth(
+    config: EnvironmentConfig, *, expected_registry_host: str | None = None
+) -> None:
     path = config.application.registry_auth_file
     if path is None:
         return
@@ -197,6 +244,67 @@ def validate_registry_auth(config: EnvironmentConfig) -> None:
         raise ConfigurationError("Registry authentication file is not valid JSON") from exc
     if not isinstance(document, dict) or not isinstance(document.get("auths"), dict):
         raise ConfigurationError("Registry authentication file must contain an auths mapping")
+    if "credsStore" in document or "credHelpers" in document:
+        raise ConfigurationError(
+            "Registry authentication must be portable and cannot use credential helpers"
+        )
+    auths = document["auths"]
+    if not auths:
+        raise ConfigurationError("Registry authentication auths mapping cannot be empty")
+    normalized_hosts: set[str] = set()
+    for host, entry in auths.items():
+        if not isinstance(host, str) or not host or not isinstance(entry, dict):
+            raise ConfigurationError("Registry authentication contains an invalid entry")
+        encoded = entry.get("auth")
+        if not isinstance(encoded, str) or not encoded:
+            raise ConfigurationError(
+                "Registry authentication entries require inline auth credentials"
+            )
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeError) as exc:
+            raise ConfigurationError(
+                "Registry authentication contains invalid inline credentials"
+            ) from exc
+        username, separator, token = decoded.partition(":")
+        if not separator or not username or not token:
+            raise ConfigurationError(
+                "Registry authentication contains incomplete inline credentials"
+            )
+        normalized_hosts.add(
+            "docker.io" if host == "https://index.docker.io/v1/" else host
+        )
+    try:
+        compose: Any = yaml.safe_load(
+            config.application.compose.read_text(encoding="utf-8")
+        )
+        services = compose["services"]
+    except (OSError, UnicodeError, yaml.YAMLError, KeyError, TypeError) as exc:
+        raise ConfigurationError(
+            "Unable to match registry authentication to Compose images"
+        ) from exc
+    compose_hosts: set[str] = set()
+    for service in services.values():
+        if not isinstance(service, dict) or not isinstance(service.get("image"), str):
+            continue
+        first = service["image"].split("/", 1)[0]
+        compose_hosts.add(
+            first if "." in first or ":" in first or first == "localhost" else "docker.io"
+        )
+    if not normalized_hosts.issubset(compose_hosts):
+        raise ConfigurationError(
+            "Registry authentication contains a host not used by Compose images"
+        )
+    if expected_registry_host is not None and expected_registry_host not in normalized_hosts:
+        raise ConfigurationError(
+            "Registry authentication does not contain inline credentials for the selected registry"
+        )
+    try:
+        validate_secret_permissions(path)
+    except (OSError, SecretFileError) as exc:
+        raise ConfigurationError(
+            "Registry authentication permissions are not restrictive"
+        ) from exc
 
 
 def validate_production_isolation(repo: Path, prod: EnvironmentConfig) -> None:

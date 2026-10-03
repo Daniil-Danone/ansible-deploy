@@ -186,20 +186,48 @@ image: ghcr.io/OWNER/demo-backend@sha256:<64 hex>
 services с локальными build contexts и Stage/Production Compose. GHCR:
 
 ```powershell
-deploy images publish stage --registry ghcr --namespace OWNER --username OWNER --ask-token
+deploy images publish stage --registry ghcr --namespace OWNER --username OWNER --ask-token --ask-pull-token
+```
+
+Windows PowerShell (перенос строк):
+
+```powershell
+deploy images publish stage `
+  --registry ghcr --namespace OWNER --username OWNER `
+  --ask-token --ask-pull-token
+```
+
+macOS и Ubuntu (bash/zsh):
+
+```bash
+deploy images publish stage \
+  --registry ghcr --namespace OWNER --username OWNER \
+  --ask-token --ask-pull-token
 ```
 
 Docker Hub:
 
 ```powershell
-deploy images publish stage --registry dockerhub --namespace USER --username USER --ask-token
+deploy images publish stage --registry dockerhub --namespace USER --username USER --ask-token --ask-pull-token
 ```
 
-Токен вводится скрыто и передаётся только `docker login --password-stdin`. Для CI
-поддерживаются `GHCR_TOKEN` (или `GITHUB_TOKEN`) + `GHCR_USERNAME` (или `GITHUB_ACTOR`),
-а также `DOCKERHUB_TOKEN` + `DOCKERHUB_USERNAME`. Если credentials не переданы, CLI
-использует уже выполненный `docker login`. `--username` без `--ask-token` требует token
-env var. `--tag` переопределяет default Git SHA.
+Первый скрытый ввод (`--ask-token`) — publish token. Второй (`--ask-pull-token`) —
+**отдельный read-only token** для скачивания образов сервером; publish token никогда не
+записывается на диск. При необходимости другой учётной записи укажите `--pull-username`.
+Если поле `registry_auth_file` настроено, но сам файл ещё не существует на диске,
+publisher один раз атомарно создаёт portable Docker auth JSON: mode `0600` на
+macOS/Linux, owner-only ACL на Windows. Существующий валидный
+файл сохраняется byte-for-byte и pull token повторно не запрашивается. Invalid/helper
+config не перезаписывается: удалите конкретный ignored `registry-auth.json` и повторите
+publisher. Не копируйте `~/.docker/config.json` с Docker Desktop/macOS: он обычно зависит
+от отсутствующего на Ubuntu `credsStore`.
+
+Для CI: publish — `GHCR_TOKEN` + `GHCR_USERNAME` (либо `GITHUB_TOKEN`/`GITHUB_ACTOR`),
+pull — `GHCR_PULL_TOKEN` + опциональный `GHCR_PULL_USERNAME`; для Docker Hub аналогично
+`DOCKERHUB_TOKEN`, `DOCKERHUB_USERNAME`, `DOCKERHUB_PULL_TOKEN`,
+`DOCKERHUB_PULL_USERNAME`. Existing Docker login допустим только когда новый server auth
+создавать не требуется.
+`--username` без `--ask-token` требует token env var. `--tag` переопределяет default Git SHA.
 
 К базовому тегу CLI добавляет случайный per-run suffix: конкурентный publisher не может
 подменить mutable tag между push и проверкой. Digest берётся из результата `docker push`,
@@ -212,14 +240,15 @@ registry и только после успеха всех services атомар�
 Обновляются только строки `image:` нужных services: комментарии и остальные YAML scalar
 сохраняются byte-for-byte. Anchors, aliases и merge keys в целевом Compose отклоняются.
 
-Для private registry сохраните Docker config JSON в ignored-файл и добавьте в config:
+Для private registry добавьте путь в config (в demo он уже указан):
 
 ```yaml
 application:
   registry_auth_file: .deploy/environments/stage/registry-auth.json
 ```
 
-Никогда не передавайте registry token аргументом CLI и не коммитьте этот файл.
+`deploy images publish ... --ask-token --ask-pull-token` сам создаст ignored-файл. Никогда не
+передавайте registry token аргументом CLI и не коммитьте файл.
 
 ## Первый Stage deploy с root-паролем
 

@@ -13,6 +13,7 @@ server:
 application:
   compose: deploy/compose.stage.yml
   env_file: .deploy/environments/stage/app.env
+  registry_auth_file: .deploy/environments/stage/registry-auth.json
   remote_dir: /srv/demo-stage
   allowed_loopback_ports: [8080]
 domain: stage.example.com

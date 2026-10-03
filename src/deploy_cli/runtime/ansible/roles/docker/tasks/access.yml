@@ -1,0 +1,28 @@
+---
+- name: Add deployment account to Docker group
+  ansible.builtin.user:
+    name: "{{ deploy_user }}"
+    groups: docker
+    append: true
+
+- name: Reconnect after Docker group membership change
+  ansible.builtin.meta: reset_connection
+
+- name: Read refreshed SSH login groups
+  ansible.builtin.command: id -nG
+  become: false
+  changed_when: false
+  register: refreshed_login_groups
+  when: not ansible_check_mode
+
+- name: Require refreshed SSH login to have Docker membership
+  ansible.builtin.assert:
+    that: "'docker' in refreshed_login_groups.stdout.split()"
+    fail_msg: "Reconnected deployment account is not a member of the Docker group"
+  when: not ansible_check_mode
+
+- name: Verify deployment account Docker daemon access after reconnect
+  ansible.builtin.command: docker ps --quiet
+  become: false
+  changed_when: false
+  when: not ansible_check_mode

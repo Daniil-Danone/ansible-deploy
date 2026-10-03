@@ -1,0 +1,30 @@
+---
+- name: Exercise Docker group refresh over a persistent SSH connection
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    deploy_user: deploytest
+  tasks:
+    - name: Establish the original SSH login session before group assignment
+      ansible.builtin.command: id -Gn
+      become: false
+      changed_when: false
+      register: groups_before
+
+    - name: Require the original login session to lack Docker membership
+      ansible.builtin.assert:
+        that: "'docker' not in groups_before.stdout.split()"
+
+    - name: Apply production Docker access tasks
+      ansible.builtin.include_tasks: ../../ansible/roles/docker/tasks/access.yml
+
+    - name: Read refreshed deployment account groups
+      ansible.builtin.command: id -Gn
+      become: false
+      changed_when: false
+      register: groups_after
+
+    - name: Require the refreshed login session to have Docker membership
+      ansible.builtin.assert:
+        that: "'docker' in groups_after.stdout.split()"

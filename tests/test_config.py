@@ -1,3 +1,6 @@
+import base64
+import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -10,8 +13,10 @@ from deploy_cli.config import (
     validate_compose,
     validate_environment_file,
     validate_production_isolation,
+    validate_registry_auth,
 )
 from deploy_cli.models import EnvironmentConfig, GlobalConfig
+from deploy_cli.secret_file import secure_secret_permissions
 
 
 def test_checked_in_configuration_has_supported_schema() -> None:
@@ -120,3 +125,106 @@ def test_unsafe_linux_user_is_rejected() -> None:
 
     with pytest.raises(ValidationError, match="safe Linux"):
         EnvironmentConfig.model_validate(raw)
+
+
+def test_portable_registry_auth_is_accepted_for_compose_registry(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    _, config = load_configuration(repo, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        "services:\n  app:\n    image: ghcr.io/acme/app@sha256:" + "a" * 64 + "\n",
+        encoding="utf-8",
+    )
+    auth = tmp_path / "registry-auth.json"
+    encoded = base64.b64encode(b"octocat:token").decode()
+    auth.write_text(json.dumps({"auths": {"ghcr.io": {"auth": encoded}}}), encoding="utf-8")
+    secure_secret_permissions(auth)
+    config.application.compose = compose
+    config.application.registry_auth_file = auth
+
+    validate_registry_auth(config)
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"auths": {}, "credsStore": "desktop"}, "credential helpers"),
+        ({"auths": {}}, "cannot be empty"),
+        ({"auths": {"ghcr.io": {}}}, "inline auth"),
+        ({"auths": {"ghcr.io": {"auth": "not base64"}}}, "invalid inline"),
+        (
+            {"auths": {"ghcr.io": {"auth": base64.b64encode(b"user:").decode()}}},
+            "incomplete inline",
+        ),
+    ],
+)
+def test_nonportable_registry_auth_is_rejected_without_secret_disclosure(
+    tmp_path: Path, document: dict[str, object], message: str
+) -> None:
+    repo = Path(__file__).parents[1]
+    _, config = load_configuration(repo, "stage")
+    auth = tmp_path / "registry-auth.json"
+    auth.write_text(json.dumps(document), encoding="utf-8")
+    config.application.registry_auth_file = auth
+
+    with pytest.raises(ConfigurationError, match=message) as raised:
+        validate_registry_auth(config)
+
+    assert "not base64" not in str(raised.value)
+
+
+def test_registry_auth_for_unrelated_compose_host_is_rejected(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    _, config = load_configuration(repo, "stage")
+    auth = tmp_path / "registry-auth.json"
+    encoded = base64.b64encode(b"octocat:token").decode()
+    auth.write_text(json.dumps({"auths": {"registry.example.com": {"auth": encoded}}}))
+    config.application.registry_auth_file = auth
+
+    with pytest.raises(ConfigurationError, match="host not used"):
+        validate_registry_auth(config)
+
+
+@pytest.mark.parametrize(
+    "collision",
+    [
+        "deploy/compose.stage.yml",
+        ".deploy/environments/stage/app.env",
+        ".deploy/keys/stage_ed25519",
+        ".deploy/keys/stage_ed25519.pub",
+        ".deploy/images.yml",
+        ".deploy/environments/stage/config.yml",
+        "README.md",
+    ],
+)
+def test_registry_auth_cannot_collide_with_project_inputs(
+    tmp_path: Path, collision: str
+) -> None:
+    source = Path(__file__).parents[1] / "examples/demo-app"
+    project = tmp_path / "demo"
+    shutil.copytree(source, project)
+    path = project / ".deploy/environments/stage/config.yml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["application"]["registry_auth_file"] = collision
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="collides with protected"):
+        load_configuration(project, "stage")
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_registry_auth_must_stay_inside_project(tmp_path: Path, absolute: bool) -> None:
+    source = Path(__file__).parents[1] / "examples/demo-app"
+    project = tmp_path / "demo"
+    shutil.copytree(source, project)
+    path = project / ".deploy/environments/stage/config.yml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["application"]["registry_auth_file"] = (
+        str((tmp_path.parent / "outside-secret.json").resolve())
+        if absolute
+        else "../secret.json"
+    )
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="inside the project"):
+        load_configuration(project, "stage")

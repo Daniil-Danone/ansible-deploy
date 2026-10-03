@@ -65,6 +65,14 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--namespace", required=True)
     publish.add_argument("--username")
     publish.add_argument("--ask-token", action="store_true")
+    publish.add_argument(
+        "--pull-username", help="server pull username (defaults to publisher username)"
+    )
+    publish.add_argument(
+        "--ask-pull-token",
+        action="store_true",
+        help="prompt for a separate read-only token used by the server",
+    )
     publish.add_argument("--tag", help="image tag (defaults to application Git SHA)")
     return parser
 
@@ -149,6 +157,8 @@ def run(argv: list[str] | None = None) -> int:
                 namespace=args.namespace,
                 username=args.username,
                 ask_token=args.ask_token,
+                pull_username=args.pull_username,
+                ask_pull_token=args.ask_pull_token,
                 tag=args.tag,
             )
             for image in published:

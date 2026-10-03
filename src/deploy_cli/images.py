@@ -1,3 +1,4 @@
+import base64
 import getpass
 import hashlib
 import json
@@ -10,7 +11,7 @@ import tempfile
 import uuid
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -20,9 +21,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import AliasToken, AnchorToken, ScalarToken
 
-from .config import ConfigurationError, load_configuration
+from .config import ConfigurationError, load_configuration, validate_registry_auth
 from .redaction import Redactor
 from .runner import RunnerError
+from .secret_file import (
+    SecretFileError,
+    secure_secret_permissions,
+)
 
 if sys.platform == "win32":
     import msvcrt
@@ -172,11 +177,11 @@ def _git_tag(project: Path, supplied: str | None) -> str:
     return tag
 
 
-def _prompt_token(registry: str) -> str:
+def _prompt_token(label: str) -> str:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", getpass.GetPassWarning)
-            token = getpass.getpass(f"{registry} access token: ")
+            token = getpass.getpass(f"{label}: ")
     except getpass.GetPassWarning as exc:
         raise ConfigurationError("Secure token input is unavailable") from exc
     return _validate_token(token)
@@ -207,13 +212,48 @@ def _credentials(
     if ask_token:
         if not selected_username:
             raise ConfigurationError("Registry username is required with --ask-token")
-        return selected_username, _prompt_token(registry)
+        return selected_username, _prompt_token(f"{registry} publish token")
     if token:
         if not selected_username:
             raise ConfigurationError("Registry token was provided without a username")
         return selected_username, _validate_token(token)
     if username:
         raise ConfigurationError("--username requires --ask-token or a registry token env var")
+    return None
+
+
+def _pull_credentials(
+    registry: str,
+    username: str | None,
+    *,
+    ask_token: bool,
+    environ: dict[str, str],
+) -> tuple[str, str] | None:
+    if registry == "ghcr":
+        token = environ.get("GHCR_PULL_TOKEN")
+        env_username = (
+            environ.get("GHCR_PULL_USERNAME")
+            or environ.get("GHCR_USERNAME")
+            or environ.get("GITHUB_ACTOR")
+        )
+    else:
+        token = environ.get("DOCKERHUB_PULL_TOKEN")
+        env_username = environ.get("DOCKERHUB_PULL_USERNAME") or environ.get(
+            "DOCKERHUB_USERNAME"
+        )
+    selected_username = username or env_username
+    if ask_token:
+        if not selected_username:
+            raise ConfigurationError("Registry pull username is required with --ask-pull-token")
+        return selected_username, _prompt_token(f"{registry} server pull token")
+    if token:
+        if not selected_username:
+            raise ConfigurationError("Registry pull token was provided without a username")
+        return selected_username, _validate_token(token)
+    if username:
+        raise ConfigurationError(
+            "--pull-username requires --ask-pull-token or a pull token environment variable"
+        )
     return None
 
 
@@ -379,10 +419,10 @@ def _signature(path: Path) -> tuple[int, int, int, int]:
 
 
 @contextmanager
-def _compose_lock(path: Path) -> Iterator[None]:
+def _file_lock(path: Path, *, label: str) -> Iterator[None]:
     lock = path.parent / f".{path.name}.ansible-deploy.lock"
     if lock.is_symlink():
-        raise ConfigurationError("Compose publishing lock cannot be a symlink")
+        raise ConfigurationError(f"{label} publishing lock cannot be a symlink")
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -396,12 +436,12 @@ def _compose_lock(path: Path) -> Iterator[None]:
             or opened.st_nlink != 1
             or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
         ):
-            raise ConfigurationError("Compose publishing lock must be one regular file")
+            raise ConfigurationError(f"{label} publishing lock must be one regular file")
         _lock_descriptor(descriptor)
     except OSError as exc:
         if descriptor is not None:
             os.close(descriptor)
-        raise ConfigurationError(f"Unable to lock deployment Compose: {exc}") from exc
+        raise ConfigurationError(f"Unable to lock {label}") from exc
     except BaseException:
         if descriptor is not None:
             os.close(descriptor)
@@ -413,6 +453,23 @@ def _compose_lock(path: Path) -> Iterator[None]:
             _unlock_descriptor(descriptor)
         finally:
             os.close(descriptor)
+
+
+@contextmanager
+def _compose_lock(path: Path) -> Iterator[None]:
+    with _file_lock(path, label="Compose"):
+        yield
+
+
+@contextmanager
+def _publish_locks(compose: Path, registry_auth: Path | None) -> Iterator[None]:
+    targets = [(compose, "Compose")]
+    if registry_auth is not None:
+        targets.append((registry_auth, "registry authentication"))
+    with ExitStack() as stack:
+        for path, label in sorted(targets, key=lambda item: str(item[0]).casefold()):
+            stack.enter_context(_file_lock(path, label=label))
+        yield
 
 
 def _atomic_compose_update(path: Path, plan: ComposePlan, references: dict[str, str]) -> None:
@@ -466,6 +523,125 @@ def _atomic_compose_update(path: Path, plan: ComposePlan, references: dict[str, 
     backup.unlink()
 
 
+def _registry_auth_key(registry_host: str) -> str:
+    if registry_host == "docker.io":
+        return "https://index.docker.io/v1/"
+    return registry_host
+
+
+def _portable_registry_auth(username: str, token: str, registry_host: str) -> bytes:
+    encoded = base64.b64encode(f"{username}:{token}".encode()).decode("ascii")
+    document = {"auths": {_registry_auth_key(registry_host): {"auth": encoded}}}
+    return (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _is_reparse_path(path: Path) -> bool:
+    try:
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+    except OSError:
+        return False
+    return bool(attributes & 0x400)
+
+
+def _assert_registry_auth_target(project: Path, path: Path) -> None:
+    current = path
+    while True:
+        if current.is_symlink() or _is_reparse_path(current):
+            raise ConfigurationError(
+                "Registry authentication path cannot use symbolic links or junctions"
+            )
+        if current == project or current.parent == current:
+            break
+        current = current.parent
+    if path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
+        raise ConfigurationError("Registry authentication must be one regular file")
+    repository = subprocess.run(  # noqa: S603 - fixed Git command
+        ["git", "rev-parse", "--is-inside-work-tree"],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if repository.returncode != 0:
+        return
+    relative = path.relative_to(project)
+    tracked = subprocess.run(  # noqa: S603 - fixed Git command
+        ["git", "ls-files", "--error-unmatch", "--", str(relative)],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=False,
+    )
+    if tracked.returncode == 0:
+        raise ConfigurationError("Registry authentication file must not be tracked by Git")
+    ignored = subprocess.run(  # noqa: S603 - fixed Git command
+        ["git", "check-ignore", "--quiet", "--", str(relative)],  # noqa: S607
+        cwd=project,
+        capture_output=True,
+        check=False,
+    )
+    if ignored.returncode != 0:
+        raise ConfigurationError("Registry authentication path must be ignored by Git")
+
+
+def _create_registry_auth(path: Path, content: bytes) -> tuple[int, int, int, int]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = _durable_temporary(
+        path,
+        prefix=f".{path.name}.candidate.",
+        content=content,
+        mode=0o600,
+    )
+    try:
+        secure_secret_permissions(temporary)
+        os.link(temporary, path, follow_symlinks=False)
+    except (OSError, SecretFileError) as exc:
+        temporary.unlink(missing_ok=True)
+        raise ConfigurationError(
+            "Unable to create protected registry authentication; "
+            "existing files are never overwritten"
+        ) from exc
+    try:
+        temporary.unlink()
+    except OSError as exc:
+        try:
+            if path.samefile(temporary):
+                path.unlink(missing_ok=True)
+        finally:
+            temporary.unlink(missing_ok=True)
+        raise ConfigurationError("Unable to finalize protected registry authentication") from exc
+    return _signature(path)
+
+
+def _require_registry_auth_unchanged(
+    path: Path, snapshot: tuple[tuple[int, int, int, int], bytes]
+) -> None:
+    signature, content = snapshot
+    try:
+        unchanged = _signature(path) == signature and path.read_bytes() == content
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise ConfigurationError("Registry authentication changed during image publishing")
+
+
+@contextmanager
+def _new_registry_auth_transaction(path: Path, content: bytes) -> Iterator[None]:
+    committed_signature = _create_registry_auth(path, content)
+    try:
+        yield
+    except BaseException:
+        try:
+            owned = _signature(path) == committed_signature and path.read_bytes() == content
+        except OSError:
+            owned = False
+        if owned:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 def publish_images(
     project_dir: Path,
     environment: Literal["stage", "prod"],
@@ -475,6 +651,8 @@ def publish_images(
     username: str | None,
     ask_token: bool,
     tag: str | None,
+    pull_username: str | None = None,
+    ask_pull_token: bool = False,
     environ: dict[str, str] | None = None,
 ) -> list[PublishedImage]:
     project = project_dir.resolve()
@@ -482,15 +660,54 @@ def publish_images(
     selected_tag = _git_tag(project, tag)
     credential_environment = dict(os.environ if environ is None else environ)
     registry_host = "ghcr.io" if registry == "ghcr" else "docker.io"
+    _, deployment = load_configuration(project, environment)
+    registry_auth_path = deployment.application.registry_auth_file
     run_tag = f"{selected_tag[:111]}-{uuid.uuid4().hex[:12]}"
-    with _compose_lock(compose):
+    with _publish_locks(compose, registry_auth_path):
         # Complete YAML/service preflight happens under the interprocess lock and
         # before login, build, push or registry inspection.
         plan = _compose_plan(compose, set(config.services))
+        pull_credentials: tuple[str, str] | None = None
+        create_registry_auth = False
+        existing_auth_snapshot: tuple[tuple[int, int, int, int], bytes] | None = None
+        if registry_auth_path is not None:
+            _assert_registry_auth_target(project, registry_auth_path)
+            if registry_auth_path.exists():
+                validate_registry_auth(
+                    deployment, expected_registry_host=registry_host
+                )
+                existing_auth_snapshot = (
+                    _signature(registry_auth_path),
+                    registry_auth_path.read_bytes(),
+                )
+            else:
+                create_registry_auth = True
         credentials = _credentials(
             registry, username, ask_token=ask_token, environ=credential_environment
         )
-        secrets = {credentials[1]} if credentials is not None else set()
+        if create_registry_auth:
+            pull_credentials = _pull_credentials(
+                registry,
+                pull_username or username,
+                ask_token=ask_pull_token,
+                environ=credential_environment,
+            )
+            if pull_credentials is None:
+                raise ConfigurationError(
+                    "Private server pulls require separate --ask-pull-token or "
+                    "a registry pull token environment variable"
+                )
+        if (
+            credentials is not None
+            and pull_credentials is not None
+            and credentials[1] == pull_credentials[1]
+        ):
+            raise ConfigurationError("Publish and server pull tokens must be different")
+        secrets = {
+            value[1]
+            for value in (credentials, pull_credentials)
+            if value is not None
+        }
         redactor = Redactor(secrets)
         if credentials is not None:
             login_username, token = credentials
@@ -529,5 +746,17 @@ def publish_images(
                     immutable_reference=immutable_reference,
                 )
             )
-        _atomic_compose_update(compose, plan, immutable)
+        if create_registry_auth and registry_auth_path is not None:
+            if pull_credentials is None:
+                raise ConfigurationError("Registry pull credentials were not prepared")
+            pull_login, pull_token = pull_credentials
+            auth_content = _portable_registry_auth(pull_login, pull_token, registry_host)
+            with _new_registry_auth_transaction(registry_auth_path, auth_content):
+                _atomic_compose_update(compose, plan, immutable)
+        else:
+            if registry_auth_path is not None and existing_auth_snapshot is not None:
+                _require_registry_auth_unchanged(registry_auth_path, existing_auth_snapshot)
+            _atomic_compose_update(compose, plan, immutable)
+            if registry_auth_path is not None and existing_auth_snapshot is not None:
+                _require_registry_auth_unchanged(registry_auth_path, existing_auth_snapshot)
     return published

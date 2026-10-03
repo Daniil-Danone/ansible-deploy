@@ -25,7 +25,8 @@ integration-test:
 	python -m pytest docker_tests
 	set -e; for playbook in release_finalize release_restore legacy_snapshot identity_guard \
 		legacy_guards; do \
-		docker run --rm -e ANSIBLE_ROLES_PATH=/workspace/ansible/roles \
+		docker run --rm --entrypoint ansible-playbook \
+			-e ANSIBLE_ROLES_PATH=/workspace/ansible/roles \
 			-v "$(CURDIR):/workspace" -w /workspace ansible-deploy:local \
 			tests/integration/$$playbook.yml -i localhost, -v; \
 	done

@@ -1,3 +1,6 @@
+import base64
+import json
+import os
 import shutil
 import subprocess
 import threading
@@ -11,6 +14,7 @@ from deploy_cli import cli, images
 from deploy_cli.config import ConfigurationError
 from deploy_cli.images import PublishedImage
 from deploy_cli.runner import RunnerError
+from deploy_cli.secret_file import secure_secret_permissions
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
@@ -20,15 +24,45 @@ def _demo(tmp_path: Path) -> Path:
     source = Path(__file__).parents[1] / "examples/demo-app"
     destination = tmp_path / "demo project"
     shutil.copytree(source, destination)
+    for environment in ("stage", "prod"):
+        config_path = destination / f".deploy/environments/{environment}/config.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["application"].pop("registry_auth_file", None)
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return destination
+
+
+def _configure_registry_auth(project: Path, environment: str = "stage") -> Path:
+    config_path = project / f".deploy/environments/{environment}/config.yml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    relative = f".deploy/environments/{environment}/registry-auth.json"
+    config["application"]["registry_auth_file"] = relative
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return project / relative
+
+
+def _write_portable_auth(path: Path, username: str, credential: str) -> bytes:
+    content = images._portable_registry_auth(username, credential, "ghcr.io")
+    path.write_bytes(content)
+    secure_secret_permissions(path)
+    return content
 
 
 def test_images_publish_command_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = _demo(tmp_path)
-    calls: list[tuple[Path, str, str, str]] = []
+    calls: list[tuple[Path, str, str, str, str, bool]] = []
 
     def publish(project_dir, environment, **kwargs):
-        calls.append((project_dir, environment, kwargs["registry"], kwargs["namespace"]))
+        calls.append(
+            (
+                project_dir,
+                environment,
+                kwargs["registry"],
+                kwargs["namespace"],
+                kwargs["pull_username"],
+                kwargs["ask_pull_token"],
+            )
+        )
         return [
             PublishedImage(
                 service="backend",
@@ -51,13 +85,16 @@ def test_images_publish_command_parsing(tmp_path: Path, monkeypatch: pytest.Monk
                 "ghcr",
                 "--namespace",
                 "Acme",
+                "--pull-username",
+                "reader",
+                "--ask-pull-token",
                 "--tag",
                 "abcdef0",
             ]
         )
         == 0
     )
-    assert calls == [(project.resolve(), "stage", "ghcr", "Acme")]
+    assert calls == [(project.resolve(), "stage", "ghcr", "Acme", "reader", True)]
 
 
 @pytest.mark.parametrize(
@@ -168,6 +205,415 @@ def test_existing_docker_login_needs_no_token(
     assert not any(command[0] == "login" for command in commands)
 
 
+def test_publish_writes_portable_server_auth_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+    write_token = "write-secret"  # noqa: S105 - synthetic regression-test value
+    pull_token = "pull-secret"  # noqa: S105 - synthetic regression-test value
+
+    def docker(arguments, project_dir, redactor, *, stdin_text=None):
+        del project_dir, redactor, stdin_text
+        if arguments[0] == "push":
+            return subprocess.CompletedProcess(arguments, 0, f"digest: {DIGEST_A}\n", "")
+        if arguments[:3] == ["buildx", "imagetools", "inspect"]:
+            return subprocess.CompletedProcess(arguments, 0, f'"{DIGEST_A}"', "")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(images, "_docker", docker)
+    images.publish_images(
+        project,
+        "stage",
+        registry="ghcr",
+        namespace="acme",
+        username=None,
+        ask_token=False,
+        tag="abcdef0",
+        environ={
+            "GHCR_USERNAME": "octocat",
+            "GHCR_TOKEN": write_token,
+            "GHCR_PULL_USERNAME": "puller",
+            "GHCR_PULL_TOKEN": pull_token,
+        },
+    )
+
+    document = json.loads(auth_path.read_text(encoding="utf-8"))
+    assert set(document) == {"auths"}
+    assert set(document["auths"]) == {"ghcr.io"}
+    encoded = document["auths"]["ghcr.io"]["auth"]
+    assert base64.b64decode(encoded).decode() == f"puller:{pull_token}"
+    assert write_token.encode() not in auth_path.read_bytes()
+    assert base64.b64encode(f"octocat:{write_token}".encode()) not in auth_path.read_bytes()
+    if os.name != "nt":
+        assert auth_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_invalid_existing_server_auth_is_preserved_without_docker_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+    original = b'{"auths":{"ghcr.io":{"auth":"preserve-me"}}}\n'
+    auth_path.write_bytes(original)
+    called = False
+
+    def docker(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("Docker must not run without portable credentials")
+
+    monkeypatch.setattr(images, "_docker", docker)
+    with pytest.raises(ConfigurationError, match="invalid inline"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={},
+        )
+
+    assert called is False
+    assert auth_path.read_bytes() == original
+
+
+def test_missing_pull_token_fails_before_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    _configure_registry_auth(project)
+    called = False
+
+    def docker(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("Docker must not run before pull credential preflight")
+
+    monkeypatch.setattr(images, "_docker", docker)
+    with pytest.raises(ConfigurationError, match="separate --ask-pull-token"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={},
+        )
+
+    assert called is False
+
+
+def test_publish_token_cannot_be_reused_as_server_pull_token(tmp_path: Path) -> None:
+    project = _demo(tmp_path)
+    _configure_registry_auth(project)
+
+    with pytest.raises(ConfigurationError, match="must be different"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={
+                "GHCR_USERNAME": "octocat",
+                "GHCR_TOKEN": "same-token",
+                "GHCR_PULL_TOKEN": "same-token",
+            },
+        )
+
+
+def test_compose_commit_failure_rolls_back_registry_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+
+    def docker(arguments, project_dir, redactor, *, stdin_text=None):
+        del project_dir, redactor, stdin_text
+        if arguments[0] == "push":
+            return subprocess.CompletedProcess(arguments, 0, f"digest: {DIGEST_A}\n", "")
+        if arguments[:3] == ["buildx", "imagetools", "inspect"]:
+            return subprocess.CompletedProcess(arguments, 0, f'"{DIGEST_A}"', "")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(images, "_docker", docker)
+    monkeypatch.setattr(
+        images,
+        "_atomic_compose_update",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConfigurationError("synthetic Compose failure")
+        ),
+    )
+    with pytest.raises(ConfigurationError, match="synthetic Compose"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={
+                "GHCR_USERNAME": "octocat",
+                "GHCR_TOKEN": "write-secret",
+                "GHCR_PULL_USERNAME": "reader",
+                "GHCR_PULL_TOKEN": "pull-secret",
+            },
+        )
+
+    assert not auth_path.exists()
+    assert list(auth_path.parent.glob(".registry-auth.json.candidate.*")) == []
+
+
+def test_existing_valid_auth_is_preserved_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+    original = _write_portable_auth(auth_path, "reader", "existing-pull")  # noqa: S106
+
+    def docker(arguments, project_dir, redactor, *, stdin_text=None):
+        del project_dir, redactor, stdin_text
+        if arguments[0] == "push":
+            return subprocess.CompletedProcess(arguments, 0, f"digest: {DIGEST_A}\n", "")
+        if arguments[:3] == ["buildx", "imagetools", "inspect"]:
+            return subprocess.CompletedProcess(arguments, 0, f'"{DIGEST_A}"', "")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(images, "_docker", docker)
+    images.publish_images(
+        project,
+        "stage",
+        registry="ghcr",
+        namespace="acme",
+        username=None,
+        ask_token=False,
+        tag="abcdef0",
+        environ={},
+    )
+
+    assert auth_path.read_bytes() == original
+
+
+def test_external_existing_auth_edit_fails_cas_without_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+    _write_portable_auth(auth_path, "reader", "existing")
+    compose = project / "deploy/compose.stage.yml"
+    compose_original = compose.read_bytes()
+    external = b'{"auths":{"ghcr.io":{"auth":"external-edit"}}}\n'
+    inspections = 0
+
+    def docker(arguments, project_dir, redactor, *, stdin_text=None):
+        nonlocal inspections
+        del project_dir, redactor, stdin_text
+        if arguments[0] == "push":
+            return subprocess.CompletedProcess(arguments, 0, f"digest: {DIGEST_A}\n", "")
+        if arguments[:3] == ["buildx", "imagetools", "inspect"]:
+            inspections += 1
+            if inspections == 2:
+                auth_path.write_bytes(external)
+            return subprocess.CompletedProcess(arguments, 0, f'"{DIGEST_A}"', "")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(images, "_docker", docker)
+    with pytest.raises(ConfigurationError, match="changed during image publishing"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={},
+        )
+
+    assert auth_path.read_bytes() == external
+    assert compose.read_bytes() == compose_original
+
+
+def test_registry_auth_creation_race_never_overwrites_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "registry-auth.json"
+    winner = b"unrelated winner"
+    real_link = images.os.link
+
+    def racing_link(source, destination, *, follow_symlinks):
+        Path(destination).write_bytes(winner)
+        raise FileExistsError
+
+    monkeypatch.setattr(images.os, "link", racing_link)
+    with pytest.raises(ConfigurationError, match="never overwritten"):
+        images._create_registry_auth(path, b"candidate")
+    monkeypatch.setattr(images.os, "link", real_link)
+
+    assert path.read_bytes() == winner
+
+
+def test_unignored_registry_auth_target_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+    (project / ".gitignore").write_text(".deploy-state/\n", encoding="utf-8")
+    git = shutil.which("git")
+    assert git is not None
+    subprocess.run(  # noqa: S603, S607 - fixed test Git command
+        [git, "init"], cwd=project, check=True, capture_output=True
+    )
+    monkeypatch.setattr(images, "_docker", lambda *args, **kwargs: None)
+
+    with pytest.raises(ConfigurationError, match="ignored by Git"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={"GHCR_PULL_USERNAME": "reader", "GHCR_PULL_TOKEN": "pull"},
+        )
+    assert not auth_path.exists()
+
+
+def test_tracked_registry_auth_is_rejected_without_modification(tmp_path: Path) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+    original = _write_portable_auth(auth_path, "reader", "existing")
+    git = shutil.which("git")
+    assert git is not None
+    subprocess.run(  # noqa: S603, S607 - fixed test Git command
+        [git, "init"], cwd=project, check=True, capture_output=True
+    )
+    subprocess.run(  # noqa: S603, S607 - fixed test Git command
+        [git, "add", "-f", ".deploy/environments/stage/registry-auth.json"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(ConfigurationError, match="must not be tracked"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={},
+        )
+    assert auth_path.read_bytes() == original
+
+
+def test_registry_auth_symlink_is_rejected(tmp_path: Path) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+    target = auth_path.parent / "actual-auth.json"
+    _write_portable_auth(target, "reader", "existing")
+    try:
+        auth_path.symlink_to(target)
+    except OSError:
+        pytest.skip("Symbolic links are unavailable")
+
+    with pytest.raises(ConfigurationError, match="symbolic links or junctions"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={},
+        )
+
+
+def test_shared_auth_lock_preserves_success_after_parallel_failed_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    shared = ".deploy/environments/shared-registry-auth.json"
+    for environment in ("stage", "prod"):
+        config_path = project / f".deploy/environments/{environment}/config.yml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["application"]["registry_auth_file"] = shared
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    stage_compose = project / "deploy/compose.stage.yml"
+    prod_compose = project / "deploy/compose.prod.yml"
+    stage_original = stage_compose.read_bytes()
+    stage_entered = threading.Event()
+    release_stage = threading.Event()
+    real_update = images._atomic_compose_update
+
+    def docker(arguments, project_dir, redactor, *, stdin_text=None):
+        del project_dir, redactor, stdin_text
+        if arguments[0] == "push":
+            return subprocess.CompletedProcess(arguments, 0, f"digest: {DIGEST_A}\n", "")
+        if arguments[:3] == ["buildx", "imagetools", "inspect"]:
+            return subprocess.CompletedProcess(arguments, 0, f'"{DIGEST_A}"', "")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    def update(path, plan, references):
+        if path == stage_compose:
+            stage_entered.set()
+            assert release_stage.wait(timeout=10)
+            raise ConfigurationError("stage commit failed")
+        return real_update(path, plan, references)
+
+    monkeypatch.setattr(images, "_docker", docker)
+    monkeypatch.setattr(images, "_atomic_compose_update", update)
+    failures: list[Exception] = []
+
+    def publish(environment: str) -> None:
+        try:
+            images.publish_images(
+                project,
+                environment,  # type: ignore[arg-type]
+                registry="ghcr",
+                namespace="acme",
+                username=None,
+                ask_token=False,
+                tag="abcdef0",
+                environ={
+                    "GHCR_PULL_USERNAME": "reader",
+                    "GHCR_PULL_TOKEN": "pull-secret",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - thread evidence is asserted below
+            failures.append(exc)
+
+    stage_thread = threading.Thread(target=publish, args=("stage",))
+    prod_thread = threading.Thread(target=publish, args=("prod",))
+    stage_thread.start()
+    assert stage_entered.wait(timeout=10)
+    prod_thread.start()
+    time.sleep(0.1)
+    release_stage.set()
+    stage_thread.join(timeout=15)
+    prod_thread.join(timeout=15)
+
+    auth_path = project / shared
+    assert len(failures) == 1
+    assert "stage commit failed" in str(failures[0])
+    assert stage_compose.read_bytes() == stage_original
+    assert auth_path.is_file()
+    assert b"pull-secret" not in auth_path.read_bytes()
+    assert f"@{DIGEST_A}" in prod_compose.read_text(encoding="utf-8")
+
+
 def test_ask_token_uses_secure_prompt_and_redacts_login_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -199,6 +645,49 @@ def test_ask_token_uses_secure_prompt_and_redacts_login_failure(
     assert "[REDACTED]" in str(raised.value)
     assert calls[0][1] == token + "\n"
     assert token not in calls[0][0]
+
+
+def test_interactive_publish_prompts_for_write_then_separate_pull_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _demo(tmp_path)
+    auth_path = _configure_registry_auth(project)
+    write_token = "interactive-write"  # noqa: S105 - synthetic regression value
+    pull_token = "interactive-pull"  # noqa: S105 - synthetic regression value
+    prompts: list[str] = []
+    supplied = iter([write_token, pull_token])
+
+    def prompt(label: str) -> str:
+        prompts.append(label)
+        return next(supplied)
+
+    def docker(arguments, project_dir, redactor, *, stdin_text=None):
+        del project_dir, redactor, stdin_text
+        if arguments[0] == "push":
+            return subprocess.CompletedProcess(arguments, 0, f"digest: {DIGEST_A}\n", "")
+        if arguments[:3] == ["buildx", "imagetools", "inspect"]:
+            return subprocess.CompletedProcess(arguments, 0, f'"{DIGEST_A}"', "")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(images.getpass, "getpass", prompt)
+    monkeypatch.setattr(images, "_docker", docker)
+    images.publish_images(
+        project,
+        "stage",
+        registry="ghcr",
+        namespace="acme",
+        username="octocat",
+        ask_token=True,
+        ask_pull_token=True,
+        tag="abcdef0",
+        environ={},
+    )
+
+    assert prompts == ["ghcr publish token: ", "ghcr server pull token: "]
+    content = auth_path.read_bytes()
+    assert base64.b64encode(f"octocat:{pull_token}".encode()) in content
+    assert write_token.encode() not in content
+    assert base64.b64encode(f"octocat:{write_token}".encode()) not in content
 
 
 def test_publish_failure_does_not_partially_rewrite_compose(

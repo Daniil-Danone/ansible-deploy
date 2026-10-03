@@ -13,8 +13,5 @@
     enabled: true
     state: started
 
-- name: Add deployment account to Docker group
-  ansible.builtin.user:
-    name: "{{ deploy_user }}"
-    groups: docker
-    append: true
+- name: Refresh deployment account Docker access
+  ansible.builtin.include_tasks: access.yml

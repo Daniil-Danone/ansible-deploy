@@ -25,8 +25,8 @@ def test_openssh_fingerprint_is_calculated_from_key_blob() -> None:
 def test_changed_host_key_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     old_line, _ = _host_key(b"old-key")
     new_line, new_fingerprint = _host_key(b"new-key")
-    state = tmp_path / ".deploy-state"
-    state.mkdir()
+    state = tmp_path / ".deploy-state/stage"
+    state.mkdir(parents=True)
     (state / "known_hosts").write_text(old_line + "\n", encoding="utf-8")
     monkeypatch.setattr(
         subprocess,
@@ -39,6 +39,15 @@ def test_changed_host_key_is_rejected(tmp_path: Path, monkeypatch: pytest.Monkey
         runner.trust_host("example.com", 22, [new_fingerprint])
 
     assert raised.value.exit_code == 3
+
+
+def test_host_trust_is_namespaced_by_environment(tmp_path: Path) -> None:
+    stage = AnsibleRunner(tmp_path, Redactor([]), environment="stage")
+    prod = AnsibleRunner(tmp_path, Redactor([]), environment="prod")
+
+    assert stage.state_dir != prod.state_dir
+    assert stage.state_dir == tmp_path / ".deploy-state/stage"
+    assert prod.state_dir == tmp_path / ".deploy-state/prod"
 
 
 def test_unreachable_ssh_scan_uses_ssh_exit_code(

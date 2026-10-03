@@ -1,0 +1,95 @@
+---
+- name: Exercise crash-consistent pointer restoration on a disposable filesystem
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_dir: /tmp/ansible-deploy-release-restore-test
+    deploy_user: root
+  tasks:
+    - name: Exercise interrupted transaction states
+      block:
+        - name: Create permanent releases
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: "0750"
+          loop:
+            - "{{ app_dir }}/releases/old"
+            - "{{ app_dir }}/releases/older"
+            - "{{ app_dir }}/releases/new"
+
+        - name: Create transaction before candidate symlink exists
+          ansible.builtin.copy:
+            dest: "{{ app_dir }}/transaction.json"
+            mode: "0600"
+            content: >-
+              {{ {'candidate': app_dir + '/releases/new',
+              'final_previous': app_dir + '/releases/old',
+              'original_current': app_dir + '/releases/old',
+              'original_previous': app_dir + '/releases/older'} | to_json }}
+
+        - name: Decode transaction authority
+          ansible.builtin.slurp:
+            src: "{{ app_dir }}/transaction.json"
+          register: transaction_raw
+
+        - name: Set decoded transaction
+          ansible.builtin.set_fact:
+            release_transaction: "{{ transaction_raw.content | b64decode | from_json }}"
+
+        - name: Restore pointers before candidate activation
+          ansible.builtin.include_role:
+            name: release_restore
+
+        - name: Repeat restoration to prove convergence
+          ansible.builtin.include_role:
+            name: release_restore
+
+        - name: Inspect restored pointers
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+          loop:
+            - "{{ app_dir }}/current"
+            - "{{ app_dir }}/previous"
+            - "{{ app_dir }}/transaction.json"
+          register: restored_links
+
+        - name: Prove exact original pointers were restored
+          ansible.builtin.assert:
+            that:
+              - restored_links.results[0].stat.lnk_source == app_dir + '/releases/old'
+              - restored_links.results[1].stat.lnk_source == app_dir + '/releases/older'
+              - restored_links.results[2].stat.exists
+
+        - name: Model interrupted first deployment with no originals
+          ansible.builtin.set_fact:
+            release_transaction:
+              candidate: "{{ app_dir }}/releases/new"
+              final_previous: ""
+              original_current: ""
+              original_previous: ""
+
+        - name: Restore first deployment absent state
+          ansible.builtin.include_role:
+            name: release_restore
+
+        - name: Inspect absent first-deployment pointers
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            follow: false
+          loop:
+            - "{{ app_dir }}/current"
+            - "{{ app_dir }}/previous"
+            - "{{ app_dir }}/current-version"
+          register: absent_links
+
+        - name: Prove first-deployment recovery converged to no active release
+          ansible.builtin.assert:
+            that: absent_links.results | map(attribute='stat.exists') | select | length == 0
+      always:
+        - name: Remove disposable recovery tree
+          ansible.builtin.file:
+            path: "{{ app_dir }}"
+            state: absent

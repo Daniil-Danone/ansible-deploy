@@ -1,0 +1,94 @@
+---
+- name: Recover application from an unfinished release transaction
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Inspect pending deployment transaction
+      ansible.builtin.stat:
+        path: "{{ app_dir }}/transaction.json"
+      register: pending_transaction_file
+      check_mode: false
+
+    - name: Recover pending deployment transaction
+      when: pending_transaction_file.stat.exists
+      block:
+        - name: Read pending deployment transaction
+          ansible.builtin.slurp:
+            src: "{{ app_dir }}/transaction.json"
+          register: pending_transaction
+
+        - name: Decode pending deployment transaction
+          ansible.builtin.set_fact:
+            release_transaction: "{{ pending_transaction.content | b64decode | from_json }}"
+
+        - name: Restore authoritative committed pointers and metadata
+          ansible.builtin.include_role:
+            name: release_restore
+
+        - name: Reconcile original healthy release without pulling images
+          community.docker.docker_compose_v2:
+            project_src: "{{ app_dir }}/current"
+            files: [compose.yml]
+            env_files: [.env]
+            project_name: "{{ app_compose_project }}"
+            pull: never
+            state: present
+            remove_orphans: true
+            wait: true
+            wait_timeout: 120
+          become_user: "{{ deploy_user }}"
+          become: true
+          no_log: true
+          register: recovered_compose
+          when: release_transaction.original_current | length > 0
+
+        - name: Stop failed initial candidate services from permanent release path
+          community.docker.docker_compose_v2:
+            project_src: "{{ release_transaction.candidate }}"
+            files: [compose.yml]
+            env_files: [.env]
+            project_name: "{{ app_compose_project }}"
+            state: absent
+          become_user: "{{ deploy_user }}"
+          become: true
+          no_log: true
+          when: release_transaction.original_current | length == 0
+
+        - name: Require every recovered service to be running and healthy
+          ansible.builtin.assert:
+            that:
+              - recovered_compose.containers | length > 0
+              - item.State == 'running'
+              - (item.Health | default('')) in ['', 'healthy']
+            fail_msg: "Recovered Compose service is not running and healthy"
+          loop: "{{ recovered_compose.containers | default([]) }}"
+          no_log: true
+          when: release_transaction.original_current | length > 0
+
+        - name: Verify recovered loopback endpoint
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ app_upstream_port }}{{ health_path }}"
+            status_code: 200
+          register: recovered_loopback_health
+          retries: 12
+          delay: 5
+          until: recovered_loopback_health.status == 200
+          when: release_transaction.original_current | length > 0
+
+        - name: Verify recovered public HTTPS endpoint
+          ansible.builtin.uri:
+            url: "https://{{ app_domain }}{{ health_path }}"
+            status_code: 200
+            validate_certs: true
+          when: release_transaction.original_current | length > 0
+
+        - name: Remove recovered candidate pointer
+          ansible.builtin.file:
+            path: "{{ app_dir }}/candidate"
+            state: absent
+
+        - name: Remove transaction authority only after verified convergence
+          ansible.builtin.file:
+            path: "{{ app_dir }}/transaction.json"
+            state: absent

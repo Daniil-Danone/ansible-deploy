@@ -1,5 +1,5 @@
 ---
-- name: Verify public Stage health
+- name: Verify public environment health
   hosts: all
   gather_facts: false
   tasks:

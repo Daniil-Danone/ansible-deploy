@@ -1,0 +1,21 @@
+---
+- name: Reject project-directory-dependent legacy service features
+  ansible.builtin.assert:
+    that:
+      - legacy_service.value is mapping
+      - legacy_service.value.env_file is not defined
+      - legacy_service.value.configs is not defined
+      - legacy_service.value.secrets is not defined
+      - legacy_service.value.build is not defined
+      - legacy_service.value.extends is not defined
+      - legacy_service.value.develop is not defined
+      - legacy_service.value.label_file is not defined
+    fail_msg: >-
+      Legacy service {{ legacy_service.key }} uses a project-directory-dependent feature
+
+- name: Validate every legacy service volume
+  ansible.builtin.include_tasks: validate_volume.yml
+  loop: "{{ legacy_service.value.volumes | default([]) }}"
+  loop_control:
+    loop_var: legacy_volume
+    label: "{{ legacy_service.key }} volume"

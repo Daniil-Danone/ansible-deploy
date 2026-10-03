@@ -1,0 +1,132 @@
+---
+- name: Exercise legacy Compose portability and all-service health guards
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_allowed_bind_paths:
+      - /srv/approved-data
+    valid_legacy_compose:
+      services:
+        fixture:
+          image: nginx:1.27.5-alpine
+          volumes:
+            - ./fixture-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+            - app_data:/var/lib/app
+            - /srv/approved-data:/srv/data:ro
+      volumes:
+        app_data: null
+    invalid_legacy_cases:
+      - name: relative data bind
+        definition:
+          services:
+            app:
+              image: example/app:1
+              volumes: ["./data:/var/lib/app"]
+      - name: interpolated bind
+        definition:
+          services:
+            app:
+              image: example/app:1
+              volumes: ["${DATA_DIR}:/var/lib/app"]
+      - name: relative env file
+        definition:
+          services:
+            app:
+              image: example/app:1
+              env_file: ./app.env
+      - name: relative config file
+        definition:
+          services:
+            app:
+              image: example/app:1
+              configs: [app_config]
+          configs:
+            app_config:
+              file: ./app.conf
+      - name: relative secret file
+        definition:
+          services:
+            app:
+              image: example/app:1
+              secrets: [app_secret]
+          secrets:
+            app_secret:
+              file: ./secret.txt
+  tasks:
+    - name: Accept the known portable point-1 Compose shape
+      ansible.builtin.include_role:
+        name: legacy_compose_guard
+      vars:
+        legacy_compose_definition: "{{ valid_legacy_compose }}"
+
+    - name: Reject unsafe legacy Compose shapes independently
+      ansible.builtin.include_tasks: tasks/reject_legacy_compose.yml
+      loop: "{{ invalid_legacy_cases }}"
+      loop_control:
+        loop_var: legacy_case
+        label: "{{ legacy_case.name }}"
+
+    - name: Normalize one-line Compose ps NDJSON
+      ansible.builtin.include_role:
+        name: compose_ps_normalize
+      vars:
+        compose_ps_normalize_stdout_lines:
+          - '{"Service":"app","State":"running","Health":"healthy"}'
+
+    - name: Prove one-line NDJSON preserved exact container state
+      ansible.builtin.assert:
+        that:
+          - compose_service_containers | length == 1
+          - compose_service_containers[0].Service == 'app'
+          - compose_service_containers[0].State == 'running'
+          - compose_service_containers[0].Health == 'healthy'
+
+    - name: Normalize two-line Compose ps NDJSON
+      ansible.builtin.include_role:
+        name: compose_ps_normalize
+      vars:
+        compose_ps_normalize_stdout_lines:
+          - '{"Service":"app","State":"running","Health":"healthy"}'
+          - '{"Service":"worker","State":"running","Health":""}'
+
+    - name: Prove two-line NDJSON preserved both containers
+      ansible.builtin.assert:
+        that:
+          - compose_service_containers | length == 2
+          - compose_service_containers | map(attribute='Service') | list == ['app', 'worker']
+
+    - name: Accept the normalized complete healthy Compose service set
+      ansible.builtin.include_role:
+        name: compose_health_guard
+      vars:
+        compose_declared_services: [app, worker]
+
+    - name: Exercise unhealthy service rejection
+      block:
+        - name: Run all-service health guard with an unhealthy worker
+          ansible.builtin.include_role:
+            name: compose_health_guard
+          vars:
+            compose_declared_services: [app, worker]
+            compose_service_containers:
+              - Service: app
+                State: running
+                Health: healthy
+              - Service: worker
+                State: running
+                Health: unhealthy
+
+        - name: Record unexpected unhealthy acceptance
+          ansible.builtin.set_fact:
+            unhealthy_unexpectedly_accepted: true
+      rescue:
+        - name: Record expected unhealthy rejection
+          ansible.builtin.set_fact:
+            unhealthy_rejection_observed: true
+
+    - name: Prove unhealthy service was rejected
+      ansible.builtin.assert:
+        that:
+          - unhealthy_rejection_observed | default(false)
+          - not (unhealthy_unexpectedly_accepted | default(false))

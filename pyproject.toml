@@ -35,7 +35,7 @@ include = [
   "/tests",
   "/pyproject.toml",
   "/README.md",
-  "/GUIDE.md",
+  "/docs/**/*.md",
 ]
 
 [tool.pytest.ini_options]

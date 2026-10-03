@@ -9,7 +9,7 @@ from deploy_cli.runner import RunnerError
 from deploy_cli.workflow import deploy, deployment_manifest, dns_preflight, write_inventory
 
 
-def test_deploy_verifies_managed_access_before_hardening(tmp_path: Path) -> None:
+def test_repeat_deploy_uses_only_managed_access(tmp_path: Path) -> None:
     repo = Path(__file__).parents[1]
     global_config, config = load_configuration(repo, "stage")
     key = tmp_path / "id_ed25519"
@@ -27,17 +27,16 @@ def test_deploy_verifies_managed_access_before_hardening(tmp_path: Path) -> None
 
     names = [call.args[0] for call in runner.playbook.call_args_list]
     assert names == [
-        "guard_environment.yml",
-        "bootstrap.yml",
         "verify_deploy_access.yml",
+        "guard_environment.yml",
         "abort_release.yml",
         "site.yml",
         "health.yml",
         "finalize_release.yml",
     ]
-    assert runner.playbook.call_args_list[2].kwargs["exit_code"] == 4
-    assert runner.playbook.call_args_list[5].kwargs["exit_code"] == 7
-    assert runner.playbook.call_args_list[4].args[2]["app_compose_project"] == "myapp"
+    assert runner.playbook.call_args_list[0].args[1].name == "managed.yml"
+    assert runner.playbook.call_args_list[4].kwargs["exit_code"] == 7
+    assert runner.playbook.call_args_list[3].args[2]["app_compose_project"] == "myapp"
 
 
 def test_production_uses_separate_compose_project_name(tmp_path: Path) -> None:
@@ -77,13 +76,74 @@ def test_dry_run_does_not_mutate_bootstrap_access(tmp_path: Path) -> None:
     deploy(repo, global_config, config, runner, dry_run=True)
 
     assert [call.args[0] for call in runner.playbook.call_args_list] == [
+        "verify_deploy_access.yml",
         "guard_environment.yml",
         "site.yml",
     ]
-    assert all(call.kwargs["check"] is True for call in runner.playbook.call_args_list)
+    assert runner.playbook.call_args_list[0].kwargs.get("check") is None
+    assert all(
+        call.kwargs["check"] is True for call in runner.playbook.call_args_list[1:]
+    )
 
 
 def test_password_is_used_only_for_bootstrap_connection(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    key = tmp_path / "key"
+    public_key = tmp_path / "key.pub"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    public_key.write_text("public", encoding="utf-8")
+    config.application.env_file = env
+    config.server.ssh_key = key
+    config.server.public_key = public_key
+    runner = Mock()
+
+    managed_probe_failed = False
+
+    def first_managed_probe_fails(name, inventory, *args, **kwargs):
+        nonlocal managed_probe_failed
+        if (
+            name == "verify_deploy_access.yml"
+            and inventory.name == "managed.yml"
+            and not managed_probe_failed
+        ):
+            managed_probe_failed = True
+            raise RunnerError("deploy account is not installed yet", 3)
+
+    runner.playbook.side_effect = first_managed_probe_fails
+
+    deploy(
+        repo,
+        global_config,
+        config,
+        runner,
+        dry_run=False,
+        bootstrap_password="root-password",  # noqa: S106 - synthetic test value
+    )
+
+    calls = runner.playbook.call_args_list
+    assert [call.kwargs.get("bootstrap_password") for call in calls[:5]] == [
+        None,
+        "root-password",
+        "root-password",
+        "root-password",
+        None,
+    ]
+    assert all(call.kwargs.get("bootstrap_password") is None for call in calls[5:])
+    assert [call.args[0] for call in calls[:5]] == [
+        "verify_deploy_access.yml",
+        "verify_deploy_access.yml",
+        "guard_environment.yml",
+        "bootstrap.yml",
+        "verify_deploy_access.yml",
+    ]
+
+
+def test_repeat_deploy_never_falls_back_to_root_even_if_password_was_supplied(
+    tmp_path: Path,
+) -> None:
     repo = Path(__file__).parents[1]
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
@@ -103,15 +163,147 @@ def test_password_is_used_only_for_bootstrap_connection(tmp_path: Path) -> None:
         config,
         runner,
         dry_run=False,
-        bootstrap_password="root-password",  # noqa: S106 - synthetic test value
+        bootstrap_password="unused-root-password",  # noqa: S106 - synthetic test value
     )
 
+    assert all(call.args[1].name == "managed.yml" for call in runner.playbook.call_args_list)
+    assert all(
+        call.kwargs.get("bootstrap_password") is None
+        for call in runner.playbook.call_args_list
+    )
+
+
+def test_pre_authorized_bootstrap_key_supports_first_deploy(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    config.application.env_file = env
+    runner = Mock()
+    managed_probe_failed = False
+
+    def first_managed_probe_fails(name, inventory, *args, **kwargs):
+        nonlocal managed_probe_failed
+        if inventory.name == "managed.yml" and not managed_probe_failed:
+            managed_probe_failed = True
+            raise RunnerError("deploy account is not installed yet", 4)
+
+    runner.playbook.side_effect = first_managed_probe_fails
+
+    deploy(repo, global_config, config, runner, dry_run=False)
+
     calls = runner.playbook.call_args_list
-    assert [call.kwargs.get("bootstrap_password") for call in calls[:2]] == [
-        "root-password",
-        "root-password",
+    assert [call.args[0] for call in calls[:5]] == [
+        "verify_deploy_access.yml",
+        "verify_deploy_access.yml",
+        "guard_environment.yml",
+        "bootstrap.yml",
+        "verify_deploy_access.yml",
     ]
-    assert all(call.kwargs.get("bootstrap_password") is None for call in calls[2:])
+    assert [call.args[1].name for call in calls[:5]] == [
+        "managed.yml",
+        "bootstrap.yml",
+        "bootstrap.yml",
+        "bootstrap.yml",
+        "managed.yml",
+    ]
+    assert all(call.kwargs.get("bootstrap_password") is None for call in calls)
+
+
+def test_dry_run_without_managed_access_fails_without_bootstrap_probe(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    config.application.env_file = env
+    runner = Mock()
+    runner.playbook.side_effect = RunnerError("publickey denied", 4)
+
+    with pytest.raises(RunnerError, match="pristine server.*bootstrap SSH key") as raised:
+        deploy(repo, global_config, config, runner, dry_run=True)
+
+    assert raised.value.exit_code == 4
+    assert len(runner.playbook.call_args_list) == 1
+    assert runner.playbook.call_args.args[1].name == "managed.yml"
+
+
+def test_unreachable_managed_and_bootstrap_access_fails_actionably(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    config.application.env_file = env
+    runner = Mock()
+    runner.playbook.side_effect = RunnerError("publickey denied", 4)
+
+    with pytest.raises(RunnerError, match="bootstrap SSH access also failed") as raised:
+        deploy(repo, global_config, config, runner, dry_run=False)
+
+    assert raised.value.exit_code == 4
+    assert [call.args[1].name for call in runner.playbook.call_args_list] == [
+        "managed.yml",
+        "bootstrap.yml",
+    ]
+
+
+def test_managed_identity_mismatch_never_falls_back_to_bootstrap(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    config.application.env_file = env
+    runner = Mock()
+
+    def reject_identity(name, *args, **kwargs):
+        if name == "guard_environment.yml":
+            raise RunnerError("identity mismatch", 3)
+
+    runner.playbook.side_effect = reject_identity
+
+    with pytest.raises(RunnerError, match="identity mismatch"):
+        deploy(repo, global_config, config, runner, dry_run=False)
+
+    assert [call.args[0] for call in runner.playbook.call_args_list] == [
+        "verify_deploy_access.yml",
+        "guard_environment.yml",
+    ]
+    assert all(call.args[1].name == "managed.yml" for call in runner.playbook.call_args_list)
+
+
+def test_claimed_host_with_broken_managed_access_is_never_rebootstrapped(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "stage")
+    env = tmp_path / "stage.env"
+    env.write_text("APP_ENV=stage\n", encoding="utf-8")
+    config.application.env_file = env
+    runner = Mock()
+
+    def reject_claimed_bootstrap(name, inventory, variables, *args, **kwargs):
+        if name == "verify_deploy_access.yml" and inventory.name == "managed.yml":
+            raise RunnerError("managed key denied", 4)
+        if name == "guard_environment.yml" and inventory.name == "bootstrap.yml":
+            assert variables["require_unclaimed_environment"] is True
+            raise RunnerError("host already claimed", 3)
+
+    runner.playbook.side_effect = reject_claimed_bootstrap
+
+    with pytest.raises(RunnerError, match="host already claimed"):
+        deploy(
+            repo,
+            global_config,
+            config,
+            runner,
+            dry_run=False,
+            bootstrap_password="root-password",  # noqa: S106 - synthetic test value
+        )
+
+    assert [call.args[0] for call in runner.playbook.call_args_list] == [
+        "verify_deploy_access.yml",
+        "verify_deploy_access.yml",
+        "guard_environment.yml",
+    ]
 
 
 def test_dns_preflight_resolves_server_hostname(monkeypatch) -> None:

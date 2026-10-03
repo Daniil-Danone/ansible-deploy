@@ -68,6 +68,17 @@
   register: committed_release_metadata_file
   check_mode: false
 
+- name: Reject bootstrap access after the environment has been claimed
+  ansible.builtin.assert:
+    that:
+      - not deployment_identity_files.results[0].stat.exists
+      - not deployment_identity_files.results[1].stat.exists
+      - not committed_release_metadata_file.stat.exists
+    fail_msg: >-
+      This host already has managed deployment identity or release state;
+      repair deploy-user key/sudo access explicitly instead of rerunning bootstrap
+  when: require_unclaimed_environment | default(false) | bool
+
 - name: Read committed release routing metadata
   ansible.builtin.slurp:
     src: "{{ app_dir }}/current/deployment.json"

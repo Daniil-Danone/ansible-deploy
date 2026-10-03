@@ -1,5 +1,7 @@
+import warnings
 from pathlib import Path
 
+import pytest
 import yaml
 
 from deploy_cli import cli
@@ -50,6 +52,7 @@ def test_public_health_failure_keeps_health_exit_code(
         yaml.safe_dump(raw), encoding="utf-8"
     )
     monkeypatch.setattr(cli, "dns_preflight", lambda config: None)
+    monkeypatch.setattr(cli, "ensure_deploy_key", lambda config: "using test key")
     monkeypatch.setattr(
         cli,
         "deploy",
@@ -60,14 +63,18 @@ def test_public_health_failure_keeps_health_exit_code(
 
 
 def test_prod_requires_explicit_confirmation(monkeypatch) -> None:
-    monkeypatch.setattr(cli, "_load_and_validate", lambda repo, env, command: _loaded(env))
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
 
     assert run(["prod", "--version", "abcdef0"]) == 2
 
 
 def test_prod_yes_dispatches_versioned_deploy(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(cli, "_load_and_validate", lambda repo, env, command: _loaded(env))
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
     monkeypatch.setattr(cli, "dns_preflight", lambda config: None)
     monkeypatch.setattr(
         cli,
@@ -82,7 +89,9 @@ def test_prod_yes_dispatches_versioned_deploy(monkeypatch) -> None:
 
 
 def test_prod_dry_run_does_not_require_confirmation(monkeypatch) -> None:
-    monkeypatch.setattr(cli, "_load_and_validate", lambda repo, env, command: _loaded(env))
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
     monkeypatch.setattr(cli, "dns_preflight", lambda config: None)
     monkeypatch.setattr(cli, "deploy", lambda *args, **kwargs: None)
 
@@ -91,7 +100,9 @@ def test_prod_dry_run_does_not_require_confirmation(monkeypatch) -> None:
 
 def test_server_update_all_is_ordered_and_reports_failure(monkeypatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(cli, "_load_and_validate", lambda repo, env, command: _loaded(env))
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
 
     def update(repo, global_config, config, runner, **kwargs):
         calls.append(config.environment)
@@ -106,7 +117,9 @@ def test_server_update_all_is_ordered_and_reports_failure(monkeypatch) -> None:
 
 def test_server_update_all_attempts_prod_after_stage_failure(monkeypatch) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(cli, "_load_and_validate", lambda repo, env, command: _loaded(env))
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
 
     def update(repo, global_config, config, runner, **kwargs):
         calls.append(config.environment)
@@ -120,7 +133,9 @@ def test_server_update_all_attempts_prod_after_stage_failure(monkeypatch) -> Non
 
 
 def test_rollback_failure_keeps_rollback_exit_code(monkeypatch) -> None:
-    monkeypatch.setattr(cli, "_load_and_validate", lambda repo, env, command: _loaded(env))
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
     monkeypatch.setattr(
         cli,
         "rollback",
@@ -128,3 +143,91 @@ def test_rollback_failure_keeps_rollback_exit_code(monkeypatch) -> None:
     )
 
     assert run(["rollback", "prod", "--yes"]) == 9
+
+
+def test_password_bootstrap_prompts_after_production_confirmation(monkeypatch) -> None:
+    events: list[str] = []
+    dispatched: list[str | None] = []
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
+    monkeypatch.setattr(cli, "dns_preflight", lambda config: None)
+    monkeypatch.setattr(
+        cli,
+        "_confirm_production",
+        lambda *args, **kwargs: events.append("confirmation"),
+    )
+    monkeypatch.setattr(
+        cli.getpass,
+        "getpass",
+        lambda prompt: events.append("password") or "root-password",
+    )
+    monkeypatch.setattr(
+        cli,
+        "deploy",
+        lambda *args, **kwargs: dispatched.append(kwargs["bootstrap_password"]),
+    )
+
+    assert run(["prod", "--ask-bootstrap-password", "--version", "abcdef0"]) == 0
+    assert events == ["confirmation", "password"]
+    assert dispatched == ["root-password"]
+
+
+def test_empty_bootstrap_password_is_rejected(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "")
+
+    assert run(["stage", "--ask-bootstrap-password", "--version", "abcdef0"]) == 2
+
+
+def test_password_bootstrap_is_rejected_in_dry_run_without_prompt(monkeypatch) -> None:
+    prompted = False
+
+    def prompt(message):
+        nonlocal prompted
+        prompted = True
+        return "should-not-be-read"
+
+    monkeypatch.setattr(cli.getpass, "getpass", prompt)
+
+    assert (
+        run(
+            [
+                "stage",
+                "--ask-bootstrap-password",
+                "--dry-run",
+                "--version",
+                "abcdef0",
+            ]
+        )
+        == 2
+    )
+    assert prompted is False
+
+
+@pytest.mark.parametrize("password", ["bad\0value", "bad\rvalue", "bad\nvalue"])
+def test_bootstrap_password_rejects_protocol_delimiters(monkeypatch, password: str) -> None:
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: password)
+
+    with pytest.raises(cli.ConfigurationError, match="NUL, CR or LF"):
+        cli._prompt_bootstrap_password("root", "server")
+
+
+def test_bootstrap_password_preserves_spaces_and_tabs(monkeypatch) -> None:
+    expected = "  spaced\tpassword  "
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: expected)
+
+    assert cli._prompt_bootstrap_password("root", "server") == expected
+
+
+def test_getpass_insecure_fallback_is_rejected(monkeypatch) -> None:
+    def insecure_prompt(prompt):
+        warnings.warn("fallback", cli.getpass.GetPassWarning, stacklevel=2)
+        return "must-not-be-used"
+
+    monkeypatch.setattr(cli.getpass, "getpass", insecure_prompt)
+
+    with pytest.raises(cli.ConfigurationError, match="Secure password input is unavailable"):
+        cli._prompt_bootstrap_password("root", "server")

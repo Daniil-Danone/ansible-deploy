@@ -22,6 +22,7 @@ syntax-check:
 	done
 
 integration-test:
+	python -m pytest docker_tests
 	set -e; for playbook in release_finalize release_restore legacy_snapshot identity_guard \
 		legacy_guards; do \
 		docker run --rm -e ANSIBLE_ROLES_PATH=/workspace/ansible/roles \

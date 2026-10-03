@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
@@ -22,6 +23,7 @@ class AnsibleRunner:
         self, repo: Path, redactor: Redactor, *, environment: str = "stage", verbose: bool = False
     ) -> None:
         self.repo = repo
+        self.environment = environment
         self.redactor = redactor
         self.state_dir = repo / ".deploy-state" / environment
         self.verbose = verbose
@@ -30,10 +32,13 @@ class AnsibleRunner:
         self._run(["docker", "build", "-t", "ansible-deploy:local", "."], exit_code=5)
 
     def trust_host(self, host: str, port: int, expected_fingerprints: list[str]) -> None:
+        container_name = self._container_name()
         args = [
             "docker",
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--entrypoint",
             "ssh-keyscan",
             "ansible-deploy:local",
@@ -43,6 +48,7 @@ class AnsibleRunner:
             str(port),
             host,
         ]
+        completed = False
         try:
             result = subprocess.run(  # noqa: S603 - fixed executable and argument vector
                 args,
@@ -52,9 +58,16 @@ class AnsibleRunner:
                 encoding="utf-8",
                 errors="replace",
                 check=False,
+                timeout=20,
             )
+            completed = True
+        except KeyboardInterrupt:
+            raise
         except (OSError, subprocess.SubprocessError) as exc:
             raise RunnerError(f"Unable to scan SSH host key: {exc}", 4) from exc
+        finally:
+            if not completed:
+                self._cleanup_container(container_name)
         scanned = {
             line.strip()
             for line in result.stdout.splitlines()
@@ -93,6 +106,7 @@ class AnsibleRunner:
         registry_auth_file: Path | None = None,
         check: bool = False,
         exit_code: int = 5,
+        bootstrap_password: str | None = None,
     ) -> None:
         args = [
             "docker",
@@ -117,6 +131,10 @@ class AnsibleRunner:
             "--extra-vars",
             json.dumps(variables),
         ]
+        password_stdin: str | None = None
+        if bootstrap_password is not None:
+            args[3:3] = ["-i", "-e", "ANSIBLE_BOOTSTRAP_PASSWORD_STDIN=1"]
+            password_stdin = bootstrap_password
         if compose_file is not None:
             args[3:3] = ["-v", f"{compose_file}:/run/config/compose.yml:ro"]
         if env_file is not None:
@@ -127,16 +145,30 @@ class AnsibleRunner:
             args.extend(["--check", "--diff"])
         if self.verbose:
             args.append("-vv")
-        self._run(args, exit_code=exit_code)
+        self._run(args, exit_code=exit_code, stdin_text=password_stdin)
 
     def _container_path(self, path: Path) -> str:
         return "/workspace/" + path.resolve().relative_to(self.repo).as_posix()
 
-    def _run(self, args: Sequence[str], *, exit_code: int) -> None:
+    def _run(
+        self,
+        args: Sequence[str],
+        *,
+        exit_code: int,
+        stdin_text: str | None = None,
+    ) -> None:
+        command = list(args)
+        container_name: str | None = None
+        if command[:2] == ["docker", "run"]:
+            container_name = self._container_name()
+            command[2:2] = ["--name", container_name]
+        process: subprocess.Popen[str] | None = None
+        completed = False
         try:
             process = subprocess.Popen(  # noqa: S603 - argument vector, never a shell
-                args,
+                command,
                 cwd=self.repo,
+                stdin=subprocess.PIPE if stdin_text is not None else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -144,15 +176,68 @@ class AnsibleRunner:
                 errors="replace",
                 env=os.environ.copy(),
             )
+            if process.stdout is None:
+                raise RunnerError("Runtime output pipe was not created", exit_code)
+            if stdin_text is not None:
+                if process.stdin is None:
+                    raise RunnerError("Runtime input pipe was not created", exit_code)
+                process.stdin.write(stdin_text)
+                process.stdin.close()
+            for line in process.stdout:
+                print(self.redactor(line), end="", file=sys.stderr)
+            result = process.wait()
+            completed = True
+            if result:
+                raise RunnerError(f"Ansible runtime failed with code {result}", exit_code)
+        except RunnerError:
+            raise
         except (OSError, subprocess.SubprocessError) as exc:
-            raise RunnerError(f"Unable to start runtime: {exc}", exit_code) from exc
-        if process.stdout is None:
-            raise RunnerError("Runtime output pipe was not created", exit_code)
-        for line in process.stdout:
-            print(self.redactor(line), end="", file=sys.stderr)
-        result = process.wait()
-        if result:
-            raise RunnerError(f"Ansible runtime failed with code {result}", exit_code)
+            raise RunnerError("Ansible runtime I/O failed", exit_code) from exc
+        finally:
+            if container_name is not None and not completed:
+                self._cleanup_container(container_name)
+            running = False
+            if process is not None:
+                try:
+                    running = process.poll() is None
+                except OSError:
+                    running = True
+            if process is not None and running:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        process.kill()
+                    finally:
+                        process.wait(timeout=2)
+
+    def _container_name(self) -> str:
+        return f"ansible-deploy-{self.environment}-{uuid.uuid4().hex}"
+
+    def _cleanup_container(self, container_name: str) -> None:
+        stop = self._docker_cleanup(["stop", "--time", "1", container_name])
+        if stop != 0:
+            self._docker_cleanup(["kill", container_name])
+        self._docker_cleanup(["rm", "-f", container_name])
+
+    def _docker_cleanup(self, arguments: list[str]) -> int:
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed Docker command vector
+                ["docker", *arguments],  # noqa: S607 - standard Docker executable
+                cwd=self.repo,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=2,
+            )
+            return result.returncode
+        except (OSError, subprocess.SubprocessError, KeyboardInterrupt):
+            return -1
 
 
 def _fingerprint(known_host_line: str) -> str:

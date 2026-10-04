@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+from io import StringIO
 from pathlib import Path
 from typing import Any, Literal, overload
 
@@ -14,6 +15,12 @@ from pydantic import BaseModel, ValidationError
 
 from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .secret_file import SecretFileError, validate_secret_permissions
+from .secret_store import (
+    SecretStoreError,
+    external_secret_location,
+    resolve_external_file,
+    validate_external_file_for_use,
+)
 
 
 class ConfigurationError(ValueError):
@@ -73,6 +80,86 @@ def _project_secret_path(project_dir: Path, configured: Path, *, field: str) -> 
     except ValueError as exc:
         raise ConfigurationError(f"{field} path must stay inside the project directory") from exc
     return lexical
+
+
+def _external_file_path(
+    project_dir: Path, configured: Path, *, field: str, secret: bool = True
+) -> Path:
+    try:
+        return resolve_external_file(project_dir, configured, secret=secret)
+    except SecretStoreError:
+        raise ConfigurationError(f"Invalid schema v2 {field}") from None
+
+
+def _set_external_context(
+    project_dir: Path, config: EnvironmentConfig | MonitoringConfig
+) -> None:
+    try:
+        location = external_secret_location(project_dir)
+        config.set_external_secret_context(
+            project_dir,
+            location.root,
+            location.trusted_base,
+            location.validate_trusted_base,
+        )
+    except SecretStoreError:
+        raise ConfigurationError(
+            f"Invalid schema v2 secret store for {config.environment}"
+        ) from None
+
+
+def validate_external_input_for_use(
+    config: EnvironmentConfig | MonitoringConfig,
+    path: Path,
+    *,
+    field: str,
+    secret: bool = True,
+) -> None:
+    if config.schema_version != 2:
+        return
+    context = config.external_secret_context
+    if context is None:
+        raise ConfigurationError(
+            f"Schema v2 secret context is unavailable for {config.environment}"
+        )
+    project_dir, root, trusted_base, validate_trusted_base = context
+    try:
+        validate_external_file_for_use(
+            project_dir,
+            root,
+            path,
+            secret=secret,
+            trusted_base=trusted_base,
+            validate_trusted_base=validate_trusted_base,
+        )
+    except SecretStoreError:
+        # Configured names and absolute external paths are sensitive metadata too.
+        raise ConfigurationError(
+            f"Required {field} is unavailable for {config.environment}"
+        ) from None
+
+
+def read_external_secret_bytes(
+    config: EnvironmentConfig | MonitoringConfig, path: Path, *, field: str
+) -> bytes:
+    validate_external_input_for_use(config, path, field=field)
+    try:
+        return path.read_bytes()
+    except OSError:
+        raise ConfigurationError(
+            f"Unable to read {field} for {config.environment}"
+        ) from None
+
+
+def read_external_secret_text(
+    config: EnvironmentConfig | MonitoringConfig, path: Path, *, field: str
+) -> str:
+    try:
+        return read_external_secret_bytes(config, path, field=field).decode("utf-8")
+    except UnicodeError:
+        raise ConfigurationError(
+            f"Invalid {field} encoding for {config.environment}"
+        ) from None
 
 
 def _reject_registry_auth_collisions(
@@ -154,15 +241,29 @@ def load_configuration(
             f"file declares {env_config.environment!r}"
         )
     if isinstance(env_config, MonitoringConfig):
-        env_config.monitoring.secrets_file = _project_secret_path(
-            project_dir, env_config.monitoring.secrets_file, field="monitoring secrets"
-        )
-        env_config.server.ssh_key = _project_key_path(
-            project_dir, env_config.server.ssh_key, field="SSH private key"
-        )
-        env_config.server.public_key = _project_key_path(
-            project_dir, env_config.server.public_key, field="SSH public key"
-        )
+        if env_config.schema_version == 2:
+            env_config.monitoring.secrets_file = _external_file_path(
+                project_dir, env_config.monitoring.secrets_file, field="monitoring secrets"
+            )
+            env_config.server.ssh_key = _external_file_path(
+                project_dir, env_config.server.ssh_key, field="SSH private key"
+            )
+            env_config.server.public_key = _external_file_path(
+                project_dir,
+                env_config.server.public_key,
+                field="SSH public key",
+                secret=False,
+            )
+        else:
+            env_config.monitoring.secrets_file = _project_secret_path(
+                project_dir, env_config.monitoring.secrets_file, field="monitoring secrets"
+            )
+            env_config.server.ssh_key = _project_key_path(
+                project_dir, env_config.server.ssh_key, field="SSH private key"
+            )
+            env_config.server.public_key = _project_key_path(
+                project_dir, env_config.server.public_key, field="SSH public key"
+            )
         _reject_secret_collisions(
             env_config.monitoring.secrets_file,
             {
@@ -174,26 +275,53 @@ def load_configuration(
             },
             field="Monitoring secret",
         )
+        if env_config.schema_version == 2:
+            _set_external_context(project_dir, env_config)
         return global_config, env_config
     app = env_config.application
     app.compose = _project_application_path(project_dir, app.compose, field="Compose")
-    app.env_file = _project_application_path(
-        project_dir, app.env_file, field="environment file"
-    )
-    if app.registry_auth_file is not None:
-        app.registry_auth_file = _project_secret_path(
-            project_dir, app.registry_auth_file, field="registry authentication"
+    if env_config.schema_version == 2:
+        app.env_file = _external_file_path(
+            project_dir, app.env_file, field="application environment"
         )
-    env_config.server.ssh_key = _project_key_path(
-        project_dir, env_config.server.ssh_key, field="SSH private key"
-    )
-    env_config.server.public_key = _project_key_path(
-        project_dir, env_config.server.public_key, field="SSH public key"
-    )
+        if app.registry_auth_file is not None:
+            app.registry_auth_file = _external_file_path(
+                project_dir, app.registry_auth_file, field="registry authentication"
+            )
+        env_config.server.ssh_key = _external_file_path(
+            project_dir, env_config.server.ssh_key, field="SSH private key"
+        )
+        env_config.server.public_key = _external_file_path(
+            project_dir,
+            env_config.server.public_key,
+            field="SSH public key",
+            secret=False,
+        )
+    else:
+        app.env_file = _project_application_path(
+            project_dir, app.env_file, field="environment file"
+        )
+        if app.registry_auth_file is not None:
+            app.registry_auth_file = _project_secret_path(
+                project_dir, app.registry_auth_file, field="registry authentication"
+            )
+        env_config.server.ssh_key = _project_key_path(
+            project_dir, env_config.server.ssh_key, field="SSH private key"
+        )
+        env_config.server.public_key = _project_key_path(
+            project_dir, env_config.server.public_key, field="SSH public key"
+        )
     if env_config.collector is not None:
-        env_config.collector.password_file = _project_secret_path(
-            project_dir, env_config.collector.password_file, field="collector password"
-        )
+        if env_config.schema_version == 2:
+            env_config.collector.password_file = _external_file_path(
+                project_dir,
+                env_config.collector.password_file,
+                field="collector password",
+            )
+        else:
+            env_config.collector.password_file = _project_secret_path(
+                project_dir, env_config.collector.password_file, field="collector password"
+            )
         _reject_secret_collisions(
             env_config.collector.password_file,
             {
@@ -209,6 +337,8 @@ def load_configuration(
             field="Collector password",
         )
     _reject_registry_auth_collisions(project_dir, config_root, env_path, env_config)
+    if env_config.schema_version == 2:
+        _set_external_context(project_dir, env_config)
     return global_config, env_config
 
 
@@ -220,15 +350,24 @@ def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) 
     )
     if secret is None:
         raise ConfigurationError(f"{config.environment} collector is not configured")
+    validate_external_input_for_use(config, secret, field="observability secret")
     if not secret.is_file():
-        raise ConfigurationError(f"Required secret file is missing: {secret}")
+        raise ConfigurationError(
+            f"Required observability secret is unavailable for {config.environment}"
+        )
     try:
         validate_secret_permissions(secret)
     except (OSError, SecretFileError) as exc:
         raise ConfigurationError("Observability secret permissions are not restrictive") from exc
     try:
         if isinstance(config, MonitoringConfig):
-            values = dotenv_values(secret)
+            values = dotenv_values(
+                stream=StringIO(
+                    read_external_secret_text(
+                        config, secret, field="observability secret"
+                    )
+                )
+            )
             required = {
                 "GF_SECURITY_ADMIN_USER",
                 "GF_SECURITY_ADMIN_PASSWORD",
@@ -244,13 +383,15 @@ def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) 
             if not isinstance(password_hash, str) or not password_hash.startswith("$6$"):
                 raise ConfigurationError("LOKI_PUSH_PASSWORD_HASH must be a crypt SHA-512 hash")
         else:
-            password = secret.read_text(encoding="utf-8").rstrip("\r\n")
+            password = read_external_secret_text(
+                config, secret, field="observability secret"
+            ).rstrip("\r\n")
             if not password or "\n" in password or "\r" in password or "\0" in password:
                 raise ConfigurationError("Collector password file must contain one non-empty line")
     except ConfigurationError:
         raise
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise ConfigurationError("Observability secret file is invalid") from exc
+    except (OSError, UnicodeError, ValueError):
+        raise ConfigurationError("Observability secret file is invalid") from None
 
 
 def validate_local_inputs(
@@ -260,18 +401,31 @@ def validate_local_inputs(
     require_public_key: bool = True,
     require_application: bool = True,
 ) -> None:
-    required: list[Path] = []
+    required: list[tuple[str, Path, bool]] = []
     if require_ssh:
-        required.append(config.server.ssh_key)
+        required.append(("SSH private key", config.server.ssh_key, True))
     if require_public_key:
-        required.append(config.server.public_key)
+        required.append(("SSH public key", config.server.public_key, False))
     if require_application and isinstance(config, EnvironmentConfig):
-        required.extend([config.application.compose, config.application.env_file])
+        required.extend(
+            [
+                ("Compose file", config.application.compose, False),
+                ("application environment", config.application.env_file, True),
+            ]
+        )
         if config.application.registry_auth_file is not None:
-            required.append(config.application.registry_auth_file)
-    missing = [str(path) for path in required if not path.is_file()]
+            required.append(
+                ("registry authentication", config.application.registry_auth_file, True)
+            )
+    for field, path, secret in required:
+        if field != "Compose file":
+            validate_external_input_for_use(config, path, field=field, secret=secret)
+    missing = [field for field, path, _ in required if not path.is_file()]
     if missing:
-        raise ConfigurationError("Required local files are missing: " + ", ".join(missing))
+        raise ConfigurationError(
+            f"Required local inputs are missing for {config.environment}: "
+            + ", ".join(missing)
+        )
 
 
 def validate_compose(config: EnvironmentConfig) -> None:
@@ -330,9 +484,16 @@ def validate_compose(config: EnvironmentConfig) -> None:
 def validate_environment_file(config: EnvironmentConfig) -> None:
     """Validate required keys without exposing any secret values."""
     try:
-        values = dotenv_values(config.application.env_file)
-    except (OSError, ValueError) as exc:
-        raise ConfigurationError(f"Invalid environment file: {exc}") from exc
+        content = read_external_secret_text(
+            config, config.application.env_file, field="application environment"
+        )
+        values = dotenv_values(stream=StringIO(content))
+    except ConfigurationError:
+        raise
+    except ValueError:
+        raise ConfigurationError(
+            f"Invalid application environment for {config.environment}"
+        ) from None
     missing = [name for name in config.application.required_env_vars if not values.get(name)]
     if missing:
         raise ConfigurationError(
@@ -353,9 +514,13 @@ def validate_registry_auth(
     if path is None:
         return
     try:
-        document: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ConfigurationError("Registry authentication file is not valid JSON") from exc
+        document: Any = json.loads(
+            read_external_secret_text(config, path, field="registry authentication")
+        )
+    except ConfigurationError:
+        raise
+    except json.JSONDecodeError:
+        raise ConfigurationError("Registry authentication file is not valid JSON") from None
     if not isinstance(document, dict) or not isinstance(document.get("auths"), dict):
         raise ConfigurationError("Registry authentication file must contain an auths mapping")
     if "credsStore" in document or "credHelpers" in document:

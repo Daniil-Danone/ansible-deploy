@@ -1,15 +1,56 @@
 import ipaddress
 import re
-from pathlib import Path, PurePosixPath
-from typing import Literal
+import unicodedata
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+
+def _validate_v2_portable_names(raw: Any, paths: tuple[tuple[str, str], ...]) -> Any:
+    if not isinstance(raw, dict) or raw.get("schema_version") != 2:
+        return raw
+    for section, field in paths:
+        body = raw.get(section)
+        value = body.get(field) if isinstance(body, dict) else None
+        if section == "collector" and body is None:
+            continue
+        if value is None and section == "application" and field == "registry_auth_file":
+            continue
+        if not isinstance(value, str):
+            raise ValueError("schema v2 external file names must be strings")
+        posix = PurePosixPath(value)
+        windows = PureWindowsPath(value)
+        reserved = {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            *(f"COM{number}" for number in range(1, 10)),
+            *(f"LPT{number}" for number in range(1, 10)),
+        }
+        if (
+            not value
+            or unicodedata.normalize("NFC", value) != value
+            or "\\" in value
+            or ":" in value
+            or posix.is_absolute()
+            or windows.is_absolute()
+            or bool(windows.drive)
+            or value != str(posix)
+            or any(part in {"", ".", ".."} for part in posix.parts)
+            or any(part.endswith((".", " ")) for part in posix.parts)
+            or any(part.split(".", 1)[0].upper() in reserved for part in posix.parts)
+            or any(unicodedata.category(character).startswith("C") for character in value)
+        ):
+            raise ValueError("schema v2 external file names must be normalized relative paths")
+    return raw
 
 
 def _managed_remote_dir(value: str, *, field: str) -> str:
@@ -215,7 +256,12 @@ class CollectorConfig(StrictModel):
         return _managed_remote_dir(value, field="collector remote_dir")
 
 class EnvironmentConfig(StrictModel):
-    schema_version: Literal[1]
+    _project_dir: Path | None = PrivateAttr(default=None)
+    _external_secret_root: Path | None = PrivateAttr(default=None)
+    _external_trusted_base: Path | None = PrivateAttr(default=None)
+    _validate_external_trusted_base: bool = PrivateAttr(default=True)
+
+    schema_version: Literal[1, 2]
     environment: Literal["stage", "prod"]
     server: ServerConfig
     application: ApplicationConfig
@@ -223,6 +269,43 @@ class EnvironmentConfig(StrictModel):
     acme_email: str
     health_path: str = "/health"
     collector: CollectorConfig | None = None
+
+    def set_external_secret_context(
+        self, project_dir: Path, root: Path, trusted_base: Path, validate_trusted_base: bool
+    ) -> None:
+        self._project_dir = project_dir
+        self._external_secret_root = root
+        self._external_trusted_base = trusted_base
+        self._validate_external_trusted_base = validate_trusted_base
+
+    @property
+    def external_secret_context(self) -> tuple[Path, Path, Path, bool] | None:
+        if (
+            self._project_dir is None
+            or self._external_secret_root is None
+            or self._external_trusted_base is None
+        ):
+            return None
+        return (
+            self._project_dir,
+            self._external_secret_root,
+            self._external_trusted_base,
+            self._validate_external_trusted_base,
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def portable_schema_v2_names(cls, raw: Any) -> Any:
+        return _validate_v2_portable_names(
+            raw,
+            (
+                ("server", "ssh_key"),
+                ("server", "public_key"),
+                ("application", "env_file"),
+                ("application", "registry_auth_file"),
+                ("collector", "password_file"),
+            ),
+        )
 
     @model_validator(mode="after")
     def secure_health_path(self) -> "EnvironmentConfig":
@@ -270,12 +353,52 @@ class MonitoringStackConfig(StrictModel):
 
 
 class MonitoringConfig(StrictModel):
-    schema_version: Literal[1]
+    _project_dir: Path | None = PrivateAttr(default=None)
+    _external_secret_root: Path | None = PrivateAttr(default=None)
+    _external_trusted_base: Path | None = PrivateAttr(default=None)
+    _validate_external_trusted_base: bool = PrivateAttr(default=True)
+
+    schema_version: Literal[1, 2]
     environment: Literal["monitoring"]
     server: ServerConfig
     domain: str
     acme_email: str
     monitoring: MonitoringStackConfig
+
+    def set_external_secret_context(
+        self, project_dir: Path, root: Path, trusted_base: Path, validate_trusted_base: bool
+    ) -> None:
+        self._project_dir = project_dir
+        self._external_secret_root = root
+        self._external_trusted_base = trusted_base
+        self._validate_external_trusted_base = validate_trusted_base
+
+    @property
+    def external_secret_context(self) -> tuple[Path, Path, Path, bool] | None:
+        if (
+            self._project_dir is None
+            or self._external_secret_root is None
+            or self._external_trusted_base is None
+        ):
+            return None
+        return (
+            self._project_dir,
+            self._external_secret_root,
+            self._external_trusted_base,
+            self._validate_external_trusted_base,
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def portable_schema_v2_names(cls, raw: Any) -> Any:
+        return _validate_v2_portable_names(
+            raw,
+            (
+                ("server", "ssh_key"),
+                ("server", "public_key"),
+                ("monitoring", "secrets_file"),
+            ),
+        )
 
     @field_validator("domain")
     @classmethod

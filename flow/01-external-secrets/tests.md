@@ -15,9 +15,9 @@
 | T11 | Повторный `secrets init` не перезаписывает пользовательские файлы | integration ! | | 3 | [ ] |
 | T12 | Одновременное/existing-file создание не приводит к overwrite | integration ! | | 3 | [ ] |
 | T13 | `secrets audit` находит tracked/known secret в worktree и unsafe ACL, не печатая содержимое | integration ! | | 3 | [ ] |
-| T14 | Key generation создаёт пару только во внешнем store и не перезаписывает её | integration ! | | 4 | [ ] |
-| T15 | Registry publish создаёт auth только во внешнем store и rollback сохраняет прежний файл | integration ! | | 4 | [ ] |
-| T16 | Runner монтирует только отдельные external secret files `:ro`; content отсутствует в argv/env | unit ! | | 4 | [ ] |
+| T14 | Key generation создаёт пару только во внешнем store и не перезаписывает её | integration ! | | 2 | [ ] |
+| T15 | Registry publish создаёт auth только во внешнем store и rollback сохраняет прежний файл | integration ! | | 2 | [ ] |
+| T16 | Runner монтирует только отдельные external secret files `:ro`; content отсутствует в argv/env | unit ! | | 2 | [ ] |
 | T17 | Legacy v1 layout мигрируется в schema v2 с byte equality и restrictive permissions | integration ! | | 5 | [ ] |
 | T18 | Повторная migration идемпотентна | integration ! | | 5 | [ ] |
 | T19 | Destination collision запрещает overwrite и оставляет source/config неизменными | integration ! | | 5 | [ ] |

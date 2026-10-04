@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from deploy_cli import keys
 from deploy_cli.config import ConfigurationError, load_configuration
 from deploy_cli.keys import ensure_deploy_key
 
@@ -31,6 +32,47 @@ def test_missing_deploy_key_pair_is_created_once(tmp_path: Path) -> None:
     assert config.server.public_key.read_text(encoding="utf-8").startswith("ssh-ed25519 ")
     assert config.server.ssh_key.read_bytes() == first_private
     assert "Using existing deploy key" in second_message
+
+
+def test_write_exclusive_fsync_failure_removes_partially_written_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "partial-key"
+    monkeypatch.setattr(
+        keys.os,
+        "fsync",
+        lambda descriptor: (_ for _ in ()).throw(OSError("synthetic fsync failure")),
+    )
+
+    with pytest.raises(ConfigurationError, match="partial file was removed"):
+        keys._write_exclusive(destination, b"partially-written-key", 0o600)
+
+    assert not destination.exists()
+
+
+def test_write_exclusive_reports_partial_file_rollback_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "partial-key"
+    monkeypatch.setattr(
+        keys.os,
+        "fsync",
+        lambda descriptor: (_ for _ in ()).throw(OSError("synthetic fsync failure")),
+    )
+    original_unlink = Path.unlink
+
+    def failing_unlink(target: Path, *args, **kwargs):
+        if target == destination:
+            raise OSError("DO-NOT-DISCLOSE-key-path")
+        return original_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    with pytest.raises(ConfigurationError, match="rollback") as raised:
+        keys._write_exclusive(destination, b"partially-written-key", 0o600)
+
+    assert raised.value.__cause__ is None
+    assert "DO-NOT-DISCLOSE" not in str(raised.value)
+    assert destination.exists()
 
 
 def test_public_key_is_restored_from_existing_private_key(tmp_path: Path) -> None:

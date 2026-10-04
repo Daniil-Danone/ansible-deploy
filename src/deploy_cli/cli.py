@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import (
     ConfigurationError,
     load_configuration,
+    read_external_secret_text,
     validate_compose,
     validate_environment_file,
     validate_local_inputs,
@@ -293,13 +294,33 @@ def run(argv: list[str] | None = None) -> int:
         for current_environment, (global_config, config) in zip(environments, loaded, strict=True):
             secret_values: set[str] = set()
             if isinstance(config, EnvironmentConfig) and config.application.env_file.is_file():
-                env_text = config.application.env_file.read_text(encoding="utf-8")
+                if config.schema_version == 2:
+                    env_text = read_external_secret_text(
+                        config,
+                        config.application.env_file,
+                        field="application environment",
+                    )
+                else:
+                    env_text = config.application.env_file.read_text(encoding="utf-8")
                 secret_values = secrets_from_env(env_text)
             if bootstrap_password is not None:
                 secret_values.add(bootstrap_password)
             redactor = Redactor(secret_values | {str(config.server.ssh_key)})
+            external_context = config.external_secret_context
             runner = AnsibleRunner(
-                project_dir, redactor, environment=current_environment, verbose=args.verbose
+                project_dir,
+                redactor,
+                environment=current_environment,
+                verbose=args.verbose,
+                external_secret_root=(
+                    external_context[1] if external_context is not None else None
+                ),
+                external_trusted_base=(
+                    external_context[2] if external_context is not None else None
+                ),
+                validate_external_trusted_base=(
+                    external_context[3] if external_context is not None else True
+                ),
             )
             if args.command == "status":
                 if not isinstance(config, EnvironmentConfig):

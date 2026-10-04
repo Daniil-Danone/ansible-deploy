@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .redaction import Redactor
+from .secret_store import SecretStoreError, validate_external_file_for_use
 
 
 class RunnerError(RuntimeError):
@@ -22,9 +23,21 @@ class RunnerError(RuntimeError):
         self.exit_code = exit_code
 
 
+def _before_subprocess_launch() -> None:
+    """Deterministic test seam immediately before launch-boundary validation."""
+
+
 class AnsibleRunner:
     def __init__(
-        self, repo: Path, redactor: Redactor, *, environment: str = "stage", verbose: bool = False
+        self,
+        repo: Path,
+        redactor: Redactor,
+        *,
+        environment: str = "stage",
+        verbose: bool = False,
+        external_secret_root: Path | None = None,
+        external_trusted_base: Path | None = None,
+        validate_external_trusted_base: bool = True,
     ) -> None:
         self.project_dir = repo.resolve()
         # Kept as a compatibility alias for callers/tests written before project-local mode.
@@ -33,6 +46,10 @@ class AnsibleRunner:
         self.redactor = redactor
         self.state_dir = deployment_state_dir(self.project_dir, environment)
         self.verbose = verbose
+        self.external_secret_root = external_secret_root
+        self.external_trusted_base = external_trusted_base
+        self.validate_external_trusted_base = validate_external_trusted_base
+        self._pending_external_mounts: list[tuple[str, Path, bool]] = []
 
     def build_image(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ansible-deploy-runtime-") as directory:
@@ -122,6 +139,23 @@ class AnsibleRunner:
         bootstrap_password: str | None = None,
     ) -> None:
         self.state_dir = deployment_state_dir(self.project_dir, self.environment)
+        if self.external_secret_root is not None:
+            external_mounts = [
+                ("SSH private key", ssh_key, True),
+                ("application environment", env_file, True),
+                ("registry authentication", registry_auth_file, True),
+                ("observability secret", observability_secret_file, True),
+            ]
+            self._pending_external_mounts = [
+                (field, path, secret)
+                for field, path, secret in external_mounts
+                if path is not None
+            ]
+            try:
+                self._validate_external_mounts(exit_code)
+            except BaseException:
+                self._pending_external_mounts = []
+                raise
         args = [
             "docker",
             "run",
@@ -168,6 +202,24 @@ class AnsibleRunner:
             args.append("-vv")
         self._run(args, exit_code=exit_code, stdin_text=password_stdin)
 
+    def _validate_external_mounts(self, exit_code: int) -> None:
+        if self.external_secret_root is None:
+            return
+        for field, path, secret in self._pending_external_mounts:
+            try:
+                validate_external_file_for_use(
+                    self.project_dir,
+                    self.external_secret_root,
+                    path,
+                    secret=secret,
+                    trusted_base=self.external_trusted_base,
+                    validate_trusted_base=self.validate_external_trusted_base,
+                )
+            except SecretStoreError:
+                raise RunnerError(
+                    f"Required {field} is unavailable for {self.environment}", exit_code
+                ) from None
+
     def _run(
         self,
         args: Sequence[str],
@@ -183,6 +235,9 @@ class AnsibleRunner:
         process: subprocess.Popen[str] | None = None
         completed = False
         try:
+            if container_name is not None and self._pending_external_mounts:
+                _before_subprocess_launch()
+                self._validate_external_mounts(exit_code)
             process = subprocess.Popen(  # noqa: S603 - argument vector, never a shell
                 command,
                 cwd=self.repo,
@@ -212,6 +267,7 @@ class AnsibleRunner:
         except (OSError, subprocess.SubprocessError) as exc:
             raise RunnerError("Ansible runtime I/O failed", exit_code) from exc
         finally:
+            self._pending_external_mounts = []
             if container_name is not None and not completed:
                 self._cleanup_container(container_name)
             running = False

@@ -329,9 +329,9 @@ def test_registry_auth_for_unrelated_compose_host_is_rejected(tmp_path: Path) ->
     "collision",
     [
         "deploy/compose.stage.yml",
-        ".deploy/environments/stage/app.env",
-        ".deploy/keys/stage_ed25519",
-        ".deploy/keys/stage_ed25519.pub",
+        "environments/stage/app.env",
+        "keys/stage_ed25519",
+        "keys/stage_ed25519.pub",
         ".deploy/images.yml",
         ".deploy/environments/stage/config.yml",
         "README.md",
@@ -345,6 +345,7 @@ def test_registry_auth_cannot_collide_with_project_inputs(
     shutil.copytree(source, project)
     path = project / ".deploy/environments/stage/config.yml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = 1
     raw["application"]["registry_auth_file"] = collision
     path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
@@ -359,6 +360,7 @@ def test_registry_auth_must_stay_inside_project(tmp_path: Path, absolute: bool) 
     shutil.copytree(source, project)
     path = project / ".deploy/environments/stage/config.yml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = 1
     raw["application"]["registry_auth_file"] = (
         str((tmp_path.parent / "outside-secret.json").resolve())
         if absolute

@@ -18,6 +18,19 @@ from deploy_cli.config import (
 from deploy_cli.keys import ensure_deploy_key
 from deploy_cli.redaction import Redactor
 from deploy_cli.runner import AnsibleRunner, RunnerError, runtime_resources
+from deploy_cli.secret_file import secure_secret_permissions
+
+
+@pytest.fixture(autouse=True)
+def _external_secret_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted_base = tmp_path / "trusted external base"
+    trusted_base.mkdir()
+    secure_secret_permissions(trusted_base)
+    monkeypatch.setenv(
+        "ANSIBLE_DEPLOY_SECRETS_DIR", str(trusted_base / "project secrets")
+    )
 
 
 def _copy_demo(destination: Path) -> Path:
@@ -38,10 +51,9 @@ def test_project_local_config_resolves_paths_from_project_not_cwd(
     _, config = load_configuration(project, "stage")
 
     assert config.application.compose == (project / "deploy/compose.stage.yml").resolve()
-    assert config.application.env_file == (
-        project / ".deploy/environments/stage/app.env"
-    ).resolve()
-    assert config.server.ssh_key == (project / ".deploy/keys/stage_ed25519").resolve()
+    external_root = Path(os.environ["ANSIBLE_DEPLOY_SECRETS_DIR"])
+    assert config.application.env_file == external_root / "environments/stage/app.env"
+    assert config.server.ssh_key == external_root / "keys/stage_ed25519"
 
 
 def test_relative_project_path_cannot_escape_project(tmp_path: Path) -> None:

@@ -2,12 +2,12 @@
 
 - [x] 1. Контракт project identity и внешнего secret root
       Готово: T1–T4 зелёные; `deploy secrets path` печатает только внешний путь
-- [~] 2. Schema v2: все чувствительные пути резолвятся только внутри secret root
-      Готово: T5–T9 зелёные; `.deploy/` не является допустимым root для реального секрета
+- [~] 2. Schema v2 и external writers: безопасный контракт без промежуточно сломанных команд
+      Готово: T5–T9 и T14–T16 зелёные; default demo, key/registry writers и runner работают только с external secret root
 - [ ] 3. Создание и аудит secret store
       Готово: T10–T13 зелёные; `deploy secrets init` повторяем; `deploy secrets audit` обнаруживает permissions и worktree leaks
-- [ ] 4. Key generation и registry auth используют внешний store
-      Готово: T14–T16 зелёные; runner монтирует только отдельные secret files read-only
+- [S] 4. Key generation и registry auth используют внешний store — объединён с шагом 2 по решению владельца 2026-10-05
+      Готово: T14–T16 закрываются атомарно в шаге 2
 - [ ] 5. Fail-closed миграция legacy project-local secrets
       Готово: T17–T21 зелёные; collision/partial failure не меняют источник и config
 - [ ] 6. Onboarding, CI contract и читаемая документация

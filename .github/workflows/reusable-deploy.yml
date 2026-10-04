@@ -1,0 +1,98 @@
+---
+name: Reusable deployment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment and deploy target
+        required: true
+        type: string
+      deployment_sha:
+        description: Full immutable application commit SHA
+        required: true
+        type: string
+      tool_sha:
+        description: Full immutable ansible-deploy commit SHA
+        required: true
+        type: string
+      health_url:
+        description: Expected HTTPS health endpoint
+        required: true
+        type: string
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment }}
+    if: inputs.environment == 'stage' || inputs.environment == 'production'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      ANSIBLE_DEPLOY_SECRETS_DIR: ${{ runner.temp }}/ansible-deploy-secrets
+    steps:
+      - name: Validate immutable inputs
+        env:
+          DEPLOYMENT_SHA: ${{ inputs.deployment_sha }}
+          TOOL_SHA: ${{ inputs.tool_sha }}
+          HEALTH_URL: ${{ inputs.health_url }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from urllib.parse import urlsplit
+
+          for name in ("DEPLOYMENT_SHA", "TOOL_SHA"):
+              if re.fullmatch(r"[0-9a-f]{40}", os.environ[name]) is None:
+                  raise SystemExit(f"{name} must be a full lowercase Git SHA")
+          health = urlsplit(os.environ["HEALTH_URL"])
+          if health.scheme != "https" or not health.hostname or health.username:
+              raise SystemExit("HEALTH_URL must be an HTTPS URL without credentials")
+          PY
+      - name: Check out application at immutable SHA
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.deployment_sha }}
+          persist-credentials: false
+      - name: Check out deployment CLI at immutable SHA
+        uses: actions/checkout@v5
+        with:
+          repository: Daniil-Danone/ansible-deploy
+          ref: ${{ inputs.tool_sha }}
+          path: .ansible-deploy-tool
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install deployment CLI
+        run: python -m pip install ./.ansible-deploy-tool
+      - name: Materialize temporary external secret store
+        env:
+          DEPLOY_SECRET_STORE_JSON: ${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}
+        run: python .ansible-deploy-tool/scripts/materialize_ci_secrets.py
+      - name: Verify project scaffold is synchronized
+        run: deploy --project-dir . project sync --check
+      - name: Deploy and verify health
+        env:
+          TARGET: ${{ inputs.environment == 'production' && 'prod' || 'stage' }}
+          DEPLOYMENT_SHA: ${{ inputs.deployment_sha }}
+          HEALTH_URL: ${{ inputs.health_url }}
+        run: |
+          if [ "$TARGET" = prod ]; then
+            deploy --project-dir . prod --version "$DEPLOYMENT_SHA" --yes
+          else
+            deploy --project-dir . stage --version "$DEPLOYMENT_SHA"
+          fi
+          deploy --project-dir . status "$TARGET"
+          curl --fail --silent --show-error --retry 5 --retry-all-errors "$HEALTH_URL" >/dev/null
+      - name: Remove temporary secret store
+        if: always()
+        run: rm -rf -- "$ANSIBLE_DEPLOY_SECRETS_DIR"

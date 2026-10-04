@@ -1,0 +1,60 @@
+---
+name: Application delivery
+
+on:
+  pull_request:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      deploy_production:
+        description: Deploy the selected commit to Production after approval
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest
+
+  stage:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy_production)
+    needs: quality
+    permissions:
+      contents: read
+      packages: read
+    uses: Daniil-Danone/ansible-deploy/.github/workflows/reusable-deploy.yml@TOOL_FULL_SHA
+    with:
+      environment: stage
+      deployment_sha: ${{ github.sha }}
+      tool_sha: TOOL_FULL_SHA
+      health_url: https://stage.example.com/health
+
+  production:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_production
+    needs: [quality, stage]
+    permissions:
+      contents: read
+      packages: read
+    uses: Daniil-Danone/ansible-deploy/.github/workflows/reusable-deploy.yml@TOOL_FULL_SHA
+    with:
+      environment: production
+      deployment_sha: ${{ github.sha }}
+      tool_sha: TOOL_FULL_SHA
+      health_url: https://example.com/health

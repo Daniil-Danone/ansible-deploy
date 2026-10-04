@@ -59,6 +59,34 @@ def test_modified_managed_file_is_never_overwritten_on_template_upgrade(
     )
 
 
+def test_stale_conflict_candidate_is_atomically_refreshed_on_second_upgrade(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from deploy_cli import project
+
+    sync_project(tmp_path)
+    compose = tmp_path / "deploy/compose.prod.yml"
+    original = b"services: {custom: {}}\n"
+    compose.write_bytes(original)
+    templates = project._template_files()
+    relative = Path("deploy/compose.prod.yml")
+
+    templates[relative] += b"# version two\n"
+    monkeypatch.setattr(project, "_template_files", lambda: templates)
+    sync_project(tmp_path)
+    candidate = compose.with_name("compose.prod.yml.deploy-new")
+    version_two = candidate.read_bytes()
+
+    templates[relative] += b"# version three\n"
+    result = sync_project(tmp_path)
+
+    assert compose.read_bytes() == original
+    assert candidate.read_bytes() == templates[relative]
+    assert candidate.read_bytes() != version_two
+    assert result.conflicts == ((relative, Path("deploy/compose.prod.yml.deploy-new")),)
+    assert not candidate.with_name(f".{candidate.name}.deploy-tmp").exists()
+
+
 def test_customized_current_template_is_an_idempotent_noop(tmp_path: Path) -> None:
     sync_project(tmp_path)
     config = tmp_path / ".deploy/environments/stage/config.yml"

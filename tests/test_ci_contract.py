@@ -38,6 +38,26 @@ def test_reusable_deploy_has_protected_serial_environment_contract() -> None:
     assert materialize["env"]["DEPLOY_SECRET_STORE_JSON"] == (
         "${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}"  # noqa: S105 - expression
     )
+    cli_checkout = next(
+        step
+        for step in deploy["steps"]
+        if step.get("name") == "Check out deployment CLI at immutable SHA"
+    )
+    assert cli_checkout["with"]["token"] == (
+        "${{ secrets.CLI_REPOSITORY_TOKEN }}"  # noqa: S105 - expression
+    )
+    assert cli_checkout["with"]["persist-credentials"] == "false"
+    validation = deploy["steps"][0]
+    assert validation["env"]["CLI_REPOSITORY_TOKEN"] == (
+        "${{ secrets.CLI_REPOSITORY_TOKEN }}"  # noqa: S105 - expression
+    )
+    pin = next(
+        step
+        for step in deploy["steps"]
+        if step.get("name") == "Pin verified application digest in Compose"
+    )
+    assert pin["env"]["IMAGE_DIGEST"] == "${{ inputs.image_digest }}"
+    assert "service[\"image\"]" in pin["run"]
 
 
 def test_application_caller_keeps_pr_quality_only_and_gates_deployments() -> None:
@@ -45,12 +65,52 @@ def test_application_caller_keeps_pr_quality_only_and_gates_deployments() -> Non
     jobs = workflow["jobs"]
 
     assert "pull_request" in workflow["on"]
+    assert jobs["build"]["if"] == "github.event_name != 'pull_request'"
     assert "pull_request" not in jobs["stage"]["if"]
-    assert jobs["stage"]["needs"] == "quality"
-    assert jobs["production"]["needs"] == ["quality", "stage"]
+    assert jobs["build"]["needs"] == "quality"
+    assert jobs["stage"]["needs"] == ["quality", "build"]
+    assert jobs["production"]["needs"] == ["quality", "build", "stage"]
     assert jobs["stage"]["with"]["environment"] == "stage"
     assert jobs["production"]["with"]["environment"] == "production"
-    assert jobs["stage"]["with"]["deployment_sha"] == "${{ github.sha }}"
+    assert jobs["stage"]["with"]["deployment_sha"] == (
+        "${{ needs.build.outputs.deployment_sha }}"
+    )
+    assert jobs["stage"]["with"]["image_digest"] == (
+        "${{ needs.build.outputs.image_digest }}"
+    )
+    assert jobs["production"]["with"]["image_digest"] == (
+        "${{ needs.build.outputs.image_digest }}"
+    )
+
+
+def test_application_build_maps_full_sha_to_verified_registry_digest() -> None:
+    workflow = _workflow(ROOT / ".github/examples/application-deploy.yml")
+    build = workflow["jobs"]["build"]
+    publish = next(step for step in build["steps"] if step.get("id") == "publish")
+
+    assert build["environment"] == "build"
+    assert build["permissions"] == {"contents": "read", "packages": "write"}
+    assert publish["env"]["DEPLOYMENT_SHA"] == "${{ github.sha }}"
+    assert '"$IMAGE_REPOSITORY:$DEPLOYMENT_SHA"' in publish["run"]
+    assert "docker buildx build" in publish["run"]
+    assert "docker buildx imagetools inspect" in publish["run"]
+    assert "image_digest=%s" in publish["run"]
+    assert build["outputs"]["image_digest"] == "${{ steps.publish.outputs.image_digest }}"
+
+
+def test_delivery_workflows_do_not_trace_or_artifact_secrets() -> None:
+    text = "\n".join(
+        (ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            ".github/workflows/reusable-deploy.yml",
+            ".github/examples/application-deploy.yml",
+        )
+    )
+
+    assert "set -x" not in text
+    assert "actions/upload-artifact" not in text
+    assert "echo " not in text
+    assert "REGISTRY_TOKEN" not in text.replace("${{ secrets.REGISTRY_TOKEN }}", "")
 
 
 def test_workflows_pin_supported_action_majors_and_define_timeouts() -> None:

@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+env:
+  REGISTRY_HOST: ghcr.io
+  IMAGE_REPOSITORY: ghcr.io/OWNER/application
+
 jobs:
   quality:
     runs-on: ubuntu-24.04
@@ -31,30 +35,100 @@ jobs:
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest
 
+  build:
+    if: github.event_name != 'pull_request'
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: build
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      deployment_sha: ${{ steps.publish.outputs.deployment_sha }}
+      image_repository: ${{ steps.publish.outputs.image_repository }}
+      image_digest: ${{ steps.publish.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+      - name: Build, push, and verify immutable application image
+        id: publish
+        env:
+          DEPLOYMENT_SHA: ${{ github.sha }}
+        run: |
+          if ! printf '%s' "$DEPLOYMENT_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            printf '%s\n' 'deployment SHA must be a full lowercase Git SHA' >&2
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$DEPLOYMENT_SHA" ]; then
+            printf '%s\n' 'checked-out commit does not match deployment SHA' >&2
+            exit 1
+          fi
+          image_tag="$IMAGE_REPOSITORY:$DEPLOYMENT_SHA"
+          docker buildx build --platform linux/amd64 --push --tag "$image_tag" .
+          digest="$(
+            docker buildx imagetools inspect "$image_tag" --format '{{json .Manifest}}' |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])'
+          )"
+          if ! printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            printf '%s\n' 'registry returned an invalid image digest' >&2
+            exit 1
+          fi
+          immutable_ref="$IMAGE_REPOSITORY@$digest"
+          verified="$(
+            docker buildx imagetools inspect "$immutable_ref" --format '{{json .Manifest}}' |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])'
+          )"
+          if [ "$verified" != "$digest" ]; then
+            printf '%s\n' 'immutable registry verification returned a different digest' >&2
+            exit 1
+          fi
+          {
+            printf 'deployment_sha=%s\n' "$DEPLOYMENT_SHA"
+            printf 'image_repository=%s\n' "$IMAGE_REPOSITORY"
+            printf 'image_digest=%s\n' "$digest"
+          } >>"$GITHUB_OUTPUT"
+
   stage:
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
       (github.event_name == 'workflow_dispatch' && inputs.deploy_production)
-    needs: quality
+    needs: [quality, build]
     permissions:
       contents: read
       packages: read
     uses: Daniil-Danone/ansible-deploy/.github/workflows/reusable-deploy.yml@TOOL_FULL_SHA
     with:
       environment: stage
-      deployment_sha: ${{ github.sha }}
+      deployment_sha: ${{ needs.build.outputs.deployment_sha }}
       tool_sha: TOOL_FULL_SHA
       health_url: https://stage.example.com/health
+      image_repository: ${{ needs.build.outputs.image_repository }}
+      image_digest: ${{ needs.build.outputs.image_digest }}
+      compose_file: deploy/compose.stage.yml
+      compose_service: app
 
   production:
     if: github.event_name == 'workflow_dispatch' && inputs.deploy_production
-    needs: [quality, stage]
+    needs: [quality, build, stage]
     permissions:
       contents: read
       packages: read
     uses: Daniil-Danone/ansible-deploy/.github/workflows/reusable-deploy.yml@TOOL_FULL_SHA
     with:
       environment: production
-      deployment_sha: ${{ github.sha }}
+      deployment_sha: ${{ needs.build.outputs.deployment_sha }}
       tool_sha: TOOL_FULL_SHA
       health_url: https://example.com/health
+      image_repository: ${{ needs.build.outputs.image_repository }}
+      image_digest: ${{ needs.build.outputs.image_digest }}
+      compose_file: deploy/compose.prod.yml
+      compose_service: app

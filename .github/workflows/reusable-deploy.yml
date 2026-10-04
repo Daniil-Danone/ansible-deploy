@@ -20,6 +20,22 @@ on:
         description: Expected HTTPS health endpoint
         required: true
         type: string
+      image_repository:
+        description: Registry repository without a tag or digest
+        required: true
+        type: string
+      image_digest:
+        description: Verified sha256 digest produced by the build job
+        required: true
+        type: string
+      compose_file:
+        description: Project-relative Compose file to pin for this environment
+        required: true
+        type: string
+      compose_service:
+        description: Compose service built from deployment_sha
+        required: true
+        type: string
 permissions:
   contents: read
   packages: read
@@ -42,10 +58,16 @@ jobs:
           DEPLOYMENT_SHA: ${{ inputs.deployment_sha }}
           TOOL_SHA: ${{ inputs.tool_sha }}
           HEALTH_URL: ${{ inputs.health_url }}
+          IMAGE_REPOSITORY: ${{ inputs.image_repository }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          COMPOSE_FILE: ${{ inputs.compose_file }}
+          COMPOSE_SERVICE: ${{ inputs.compose_service }}
+          CLI_REPOSITORY_TOKEN: ${{ secrets.CLI_REPOSITORY_TOKEN }}
         run: |
           python - <<'PY'
           import os
           import re
+          from pathlib import PurePosixPath
           from urllib.parse import urlsplit
 
           for name in ("DEPLOYMENT_SHA", "TOOL_SHA"):
@@ -54,6 +76,20 @@ jobs:
           health = urlsplit(os.environ["HEALTH_URL"])
           if health.scheme != "https" or not health.hostname or health.username:
               raise SystemExit("HEALTH_URL must be an HTTPS URL without credentials")
+          if re.fullmatch(r"sha256:[0-9a-f]{64}", os.environ["IMAGE_DIGEST"]) is None:
+              raise SystemExit("IMAGE_DIGEST must be a sha256 digest")
+          if re.fullmatch(
+              r"[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+",
+              os.environ["IMAGE_REPOSITORY"],
+          ) is None:
+              raise SystemExit("IMAGE_REPOSITORY must not contain a tag or digest")
+          compose = PurePosixPath(os.environ["COMPOSE_FILE"])
+          if compose.is_absolute() or ".." in compose.parts or str(compose) != os.environ["COMPOSE_FILE"]:
+              raise SystemExit("COMPOSE_FILE must be a normalized project-relative path")
+          if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", os.environ["COMPOSE_SERVICE"]) is None:
+              raise SystemExit("COMPOSE_SERVICE is invalid")
+          if not os.environ["CLI_REPOSITORY_TOKEN"]:
+              raise SystemExit("CLI_REPOSITORY_TOKEN is required for the private CLI checkout")
           PY
       - name: Check out application at immutable SHA
         uses: actions/checkout@v5
@@ -66,6 +102,7 @@ jobs:
           repository: Daniil-Danone/ansible-deploy
           ref: ${{ inputs.tool_sha }}
           path: .ansible-deploy-tool
+          token: ${{ secrets.CLI_REPOSITORY_TOKEN }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -80,6 +117,31 @@ jobs:
         run: python .ansible-deploy-tool/scripts/materialize_ci_secrets.py
       - name: Verify project scaffold is synchronized
         run: deploy --project-dir . project sync --check
+      - name: Pin verified application digest in Compose
+        env:
+          COMPOSE_FILE: ${{ inputs.compose_file }}
+          COMPOSE_SERVICE: ${{ inputs.compose_service }}
+          IMAGE_REPOSITORY: ${{ inputs.image_repository }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          import yaml
+
+          path = Path(os.environ["COMPOSE_FILE"])
+          document = yaml.safe_load(path.read_text(encoding="utf-8"))
+          services = document.get("services") if isinstance(document, dict) else None
+          service = services.get(os.environ["COMPOSE_SERVICE"]) if isinstance(services, dict) else None
+          if not isinstance(service, dict) or "image" not in service:
+              raise SystemExit("COMPOSE_SERVICE must select a service with an image")
+          service["image"] = f'{os.environ["IMAGE_REPOSITORY"]}@{os.environ["IMAGE_DIGEST"]}'
+          path.write_text(
+              yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+              encoding="utf-8",
+          )
+          PY
       - name: Deploy and verify health
         env:
           TARGET: ${{ inputs.environment == 'production' && 'prod' || 'stage' }}

@@ -163,7 +163,15 @@ def sync_project(project_dir: Path, *, check: bool = False) -> ProjectSyncResult
                 next_hashes[relative.as_posix()] = desired_hash
         else:
             conflicts.append((relative, candidate.relative_to(project_dir)))
-            if not check and not candidate.exists():
+            if candidate.exists():
+                if candidate.is_symlink() or not candidate.is_file():
+                    raise ProjectError(
+                        f"Refusing unsafe conflict candidate: "
+                        f"{candidate.relative_to(project_dir).as_posix()}"
+                    )
+                if not check and candidate.read_bytes() != desired:
+                    _replace(candidate, desired)
+            elif not check:
                 _write_new(candidate, desired)
             next_hashes[relative.as_posix()] = desired_hash
 

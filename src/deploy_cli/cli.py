@@ -1,5 +1,7 @@
 import argparse
+import base64
 import getpass
+import json
 import re
 import subprocess
 import sys
@@ -40,6 +42,60 @@ from .workflow import (
     update_monitoring,
     update_server,
 )
+
+
+def _json_string_values(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        return {secret for item in value.values() for secret in _json_string_values(item)}
+    if isinstance(value, list):
+        return {secret for item in value for secret in _json_string_values(item)}
+    return set()
+
+
+def _operation_secrets(config: EnvironmentConfig | MonitoringConfig) -> set[str]:
+    """Read validated operation inputs once and return values that must never reach output."""
+    files: list[tuple[Path, str, str]] = []
+    if isinstance(config, MonitoringConfig):
+        files.append((config.monitoring.secrets_file, "monitoring secrets", "env"))
+    else:
+        files.append((config.application.env_file, "application environment", "env"))
+        if config.application.registry_auth_file is not None:
+            files.append(
+                (config.application.registry_auth_file, "registry authentication", "registry")
+            )
+        if config.collector is not None:
+            files.append((config.collector.password_file, "collector password", "raw"))
+
+    secrets = {str(config.server.ssh_key), *(str(path) for path, _, _ in files)}
+    for path, field, kind in files:
+        if not path.is_file():
+            continue
+        text = read_external_secret_text(config, path, field=field)
+        secrets.add(text)
+        if kind == "env":
+            secrets.update(secrets_from_env(text))
+        elif kind == "raw":
+            secrets.add(text.strip())
+        else:
+            try:
+                registry = json.loads(text)
+            except (json.JSONDecodeError, UnicodeError):
+                continue
+            secrets.update(_json_string_values(registry))
+            if isinstance(registry, dict):
+                auths = registry.get("auths", {})
+                if isinstance(auths, dict):
+                    for entry in auths.values():
+                        if not isinstance(entry, dict) or not isinstance(entry.get("auth"), str):
+                            continue
+                        try:
+                            decoded = base64.b64decode(entry["auth"], validate=True).decode("utf-8")
+                        except (ValueError, UnicodeError):
+                            continue
+                        secrets.update({decoded, *decoded.split(":", 1)})
+    return {secret for secret in secrets if secret}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -415,20 +471,10 @@ def run(argv: list[str] | None = None) -> int:
 
         update_failures: list[tuple[str, RunnerError]] = []
         for current_environment, (global_config, config) in zip(environments, loaded, strict=True):
-            secret_values: set[str] = set()
-            if isinstance(config, EnvironmentConfig) and config.application.env_file.is_file():
-                if config.schema_version == 2:
-                    env_text = read_external_secret_text(
-                        config,
-                        config.application.env_file,
-                        field="application environment",
-                    )
-                else:
-                    env_text = config.application.env_file.read_text(encoding="utf-8")
-                secret_values = secrets_from_env(env_text)
+            secret_values = _operation_secrets(config)
             if bootstrap_password is not None:
                 secret_values.add(bootstrap_password)
-            redactor = Redactor(secret_values | {str(config.server.ssh_key)})
+            redactor = Redactor(secret_values)
             external_context = config.external_secret_context
             runner = AnsibleRunner(
                 project_dir,

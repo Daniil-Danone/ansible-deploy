@@ -1,3 +1,5 @@
+import base64
+import json
 import warnings
 from pathlib import Path
 
@@ -12,6 +14,45 @@ from deploy_cli.runner import RunnerError
 def _loaded(environment: str):
     source = Path(__file__).parents[1]
     return cli.load_configuration(source, environment)
+
+
+@pytest.mark.parametrize("operation", ["application", "monitoring", "collector"])
+def test_operation_redactor_hides_synthetic_failure_secrets(
+    tmp_path: Path, operation: str
+) -> None:
+    secret = f"synthetic-{operation}-failure-secret"
+    if operation == "monitoring":
+        _, config = _loaded("monitoring")
+        config.monitoring.secrets_file = tmp_path / "monitoring.env"
+        config.monitoring.secrets_file.write_text(
+            f"GF_SECURITY_ADMIN_PASSWORD={secret}\n", encoding="utf-8"
+        )
+    else:
+        _, config = _loaded("stage")
+        config.application.env_file = tmp_path / "stage.env"
+        config.application.env_file.write_text("APP_ENV=stage\n", encoding="utf-8")
+        assert config.collector is not None
+        config.collector.password_file = tmp_path / "collector.password"
+        config.collector.password_file.write_text(
+            secret if operation == "collector" else "collector-secret", encoding="utf-8"
+        )
+        if operation == "application":
+            config.application.env_file.write_text(
+                f"APP_ENV=stage\nDATABASE_PASSWORD={secret}\n", encoding="utf-8"
+            )
+            registry_password = f"{secret}-registry"
+            auth = base64.b64encode(f"robot:{registry_password}".encode()).decode()
+            config.application.registry_auth_file = tmp_path / "registry.json"
+            config.application.registry_auth_file.write_text(
+                json.dumps({"auths": {"registry.example.com": {"auth": auth}}}),
+                encoding="utf-8",
+            )
+
+    redactor = cli.Redactor(cli._operation_secrets(config))
+    failure = redactor(f"operation failed: {secret} {secret}-registry")
+
+    assert secret not in failure
+    assert "[REDACTED]" in failure
 
 
 def test_missing_local_files_return_configuration_exit_code(tmp_path: Path) -> None:

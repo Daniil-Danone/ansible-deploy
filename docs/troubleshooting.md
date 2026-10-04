@@ -25,6 +25,10 @@
 ## Compose failed / output hidden
 
 CLI обязан показать status и tail только проблемных services с redaction и без env.
+Перед запуском сервисов CLI выполняет безвыводную проверку `docker compose config --quiet`:
+ошибка `configuration validation failed` означает некорректный Compose, а
+`image pull or daemon reconciliation failed` — проблему pull или Docker daemon. Исходный
+класс ошибки и exit code сохраняются, даже если автоматическая диагностика недоступна.
 Если диагностический блок сам не выполнился, используйте SSH как emergency evidence:
 
 ```bash

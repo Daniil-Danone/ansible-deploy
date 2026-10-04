@@ -4,6 +4,7 @@ import os
 import runpy
 import stat
 import subprocess
+import time
 from io import StringIO
 from pathlib import Path
 
@@ -12,7 +13,12 @@ import yaml
 
 from deploy_cli.config import load_configuration
 from deploy_cli.redaction import Redactor
-from deploy_cli.runner import AnsibleRunner, RunnerError, _fingerprint
+from deploy_cli.runner import (
+    FAILURE_OUTPUT_LINE_BYTES,
+    AnsibleRunner,
+    RunnerError,
+    _fingerprint,
+)
 
 
 def _host_key(raw: bytes) -> tuple[str, str]:
@@ -161,6 +167,69 @@ def test_success_output_is_phase_only_unless_verbose(
     assert "[RUN] build runtime image" in output
     assert "[DONE] build runtime image" in output
     assert "\x1b" not in output
+
+
+def test_silent_success_emits_safe_line_oriented_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class SlowOutput:
+        def __iter__(self):
+            time.sleep(0.04)
+            return iter(())
+
+    class Process:
+        stdout = SlowOutput()
+        stdin = None
+
+        @staticmethod
+        def wait() -> int:
+            return 0
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr("deploy_cli.runner.HEARTBEAT_INTERVAL_SECONDS", 0.01)
+
+    AnsibleRunner(tmp_path, Redactor([]))._run(["docker", "build", "context"], exit_code=5)
+
+    output = capsys.readouterr().err
+    assert "[WAIT] build runtime image is still running" in output
+    assert all("\x1b" not in line for line in output.splitlines())
+
+
+def test_failure_output_bounds_line_bytes_and_line_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    huge = "x" * (FAILURE_OUTPUT_LINE_BYTES * 2)
+
+    class Process:
+        stdout = StringIO("".join(f"line-{index}\n" for index in range(450)) + huge + "\n")
+        stdin = None
+
+        @staticmethod
+        def wait() -> int:
+            return 1
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: Process())
+
+    with pytest.raises(RunnerError):
+        AnsibleRunner(tmp_path, Redactor([]))._run(
+            ["docker", "build", "context"], exit_code=5
+        )
+
+    output = capsys.readouterr().err
+    assert "line-0" not in output
+    assert "line-51" in output
+    assert "[line truncated]" in output
+    assert max(len(line.encode("utf-8")) for line in output.splitlines()) <= (
+        FAILURE_OUTPUT_LINE_BYTES
+    )
 
 
 def test_interrupted_runtime_is_terminated_and_reaped(

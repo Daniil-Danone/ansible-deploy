@@ -2,10 +2,12 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections import deque
@@ -18,8 +20,11 @@ from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .redaction import Redactor
 from .secret_store import SecretStoreError, validate_external_file_for_use
 
-RUNTIME_IMAGE = "ansible-deploy:local"
+RUNTIME_IMAGE_REPOSITORY = "ansible-deploy"
 RUNTIME_HASH_LABEL = "io.ansible-deploy.runtime-sha256"
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+FAILURE_OUTPUT_LINES = 400
+FAILURE_OUTPUT_LINE_BYTES = 16 * 1024
 
 
 class RunnerError(RuntimeError):
@@ -55,9 +60,11 @@ class AnsibleRunner:
         self.external_trusted_base = external_trusted_base
         self.validate_external_trusted_base = validate_external_trusted_base
         self._pending_external_mounts: list[tuple[str, Path, bool]] = []
+        self.runtime_image = _runtime_image_reference(_resource_tree_hash(runtime_resources()))
 
     def build_image(self) -> None:
         runtime_hash = _resource_tree_hash(runtime_resources())
+        self.runtime_image = _runtime_image_reference(runtime_hash)
         if self._image_has_runtime_hash(runtime_hash):
             print(f"[CACHE] runtime image {runtime_hash[:12]} is current", file=sys.stderr)
             return
@@ -73,13 +80,13 @@ class AnsibleRunner:
                     "--label",
                     f"{RUNTIME_HASH_LABEL}={runtime_hash}",
                     "-t",
-                    RUNTIME_IMAGE,
+                    self.runtime_image,
                     str(context),
                 ],
                 exit_code=5,
             )
 
-    def _image_has_runtime_hash(self, runtime_hash: str) -> bool:
+    def _image_has_runtime_hash(self, runtime_hash: str, image: str | None = None) -> bool:
         try:
             result = subprocess.run(  # noqa: S603 - fixed executable and argument vector
                 [  # noqa: S607 - standard Docker executable
@@ -88,7 +95,7 @@ class AnsibleRunner:
                     "inspect",
                     "--format",
                     f'{{{{ index .Config.Labels "{RUNTIME_HASH_LABEL}" }}}}',
-                    RUNTIME_IMAGE,
+                    image or _runtime_image_reference(runtime_hash),
                 ],
                 cwd=self.repo,
                 stdin=subprocess.DEVNULL,
@@ -114,7 +121,7 @@ class AnsibleRunner:
             container_name,
             "--entrypoint",
             "ssh-keyscan",
-            "ansible-deploy:local",
+            self.runtime_image,
             "-T",
             "10",
             "-p",
@@ -217,7 +224,7 @@ class AnsibleRunner:
             f"{ssh_key}:/run/secrets-source/ssh_key:ro",
             "-e",
             "ANSIBLE_CONFIG=/opt/ansible-deploy/ansible/ansible.cfg",
-            "ansible-deploy:local",
+            self.runtime_image,
             f"/opt/ansible-deploy/ansible/playbooks/{playbook}",
             "-i",
             "/run/config/inventory.yml",
@@ -294,7 +301,7 @@ class AnsibleRunner:
         started = time.monotonic()
         step = _command_step(command)
         print(f"[RUN] {step}", file=sys.stderr)
-        buffered_output: deque[str] = deque(maxlen=400)
+        buffered_output: deque[str] = deque(maxlen=FAILURE_OUTPUT_LINES)
         try:
             if container_name is not None and self._pending_external_mounts:
                 _before_subprocess_launch()
@@ -317,17 +324,49 @@ class AnsibleRunner:
             )
             if process.stdout is None:
                 raise RunnerError("Runtime output pipe was not created", exit_code)
+            stdout = process.stdout
             if stdin_text is not None:
                 if process.stdin is None:
                     raise RunnerError("Runtime input pipe was not created", exit_code)
                 process.stdin.write(stdin_text)
                 process.stdin.close()
-            for line in process.stdout:
-                safe_line = self.redactor(line)
+            output_queue: queue.Queue[str | BaseException | None] = queue.Queue(maxsize=1)
+
+            def read_output() -> None:
+                try:
+                    for line in stdout:
+                        output_queue.put(line)
+                except BaseException as exc:  # pragma: no cover - defensive pipe boundary
+                    output_queue.put(exc)
+                    return
+                output_queue.put(None)
+
+            output_reader = threading.Thread(target=read_output, daemon=True)
+            output_reader.start()
+            next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
+            while True:
+                timeout = max(0.0, next_heartbeat - time.monotonic())
+                try:
+                    item = output_queue.get(timeout=timeout)
+                except queue.Empty:
+                    elapsed = time.monotonic() - started
+                    print(f"[WAIT] {step} is still running ({elapsed:.0f}s)", file=sys.stderr)
+                    next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
+                    continue
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                safe_line = _bounded_line(self.redactor(item))
                 if self.verbose:
                     print(safe_line, end="", file=sys.stderr)
                 else:
                     buffered_output.append(safe_line)
+                if time.monotonic() >= next_heartbeat:
+                    elapsed = time.monotonic() - started
+                    print(f"[WAIT] {step} is still running ({elapsed:.0f}s)", file=sys.stderr)
+                    next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL_SECONDS
+            output_reader.join()
             result = process.wait()
             completed = True
             if result:
@@ -400,6 +439,19 @@ def _fingerprint(known_host_line: str) -> str:
         raise RunnerError("ssh-keyscan returned an invalid public key", 3) from exc
     digest = base64.b64encode(hashlib.sha256(raw).digest()).decode("ascii").rstrip("=")
     return f"SHA256:{digest}"
+
+
+def _runtime_image_reference(runtime_hash: str) -> str:
+    return f"{RUNTIME_IMAGE_REPOSITORY}:runtime-{runtime_hash}"
+
+
+def _bounded_line(line: str) -> str:
+    encoded = line.encode("utf-8", errors="replace")
+    if len(encoded) <= FAILURE_OUTPUT_LINE_BYTES:
+        return line
+    suffix = b"... [line truncated]\n"
+    prefix = encoded[: FAILURE_OUTPUT_LINE_BYTES - len(suffix)]
+    return prefix.decode("utf-8", errors="ignore") + suffix.decode("ascii")
 
 
 def runtime_resources() -> Traversable:

@@ -94,6 +94,11 @@ def test_compose_failures_collect_bounded_safe_diagnostics() -> None:
     for workflow in (application, rollback, abort, monitoring, collector):
         assert "name: compose_diagnostics" in workflow
         assert "safe diagnostics are shown above" in workflow
+    for workflow in (application, monitoring, collector):
+        assert "- config\n          - --quiet" in workflow
+        assert "configuration validation failed" in workflow
+        assert "image pull or daemon reconciliation failed" in workflow
+        assert "diagnostics are unavailable" in workflow
 
 
 def test_legacy_stage_is_verified_before_secure_snapshot_and_commit() -> None:

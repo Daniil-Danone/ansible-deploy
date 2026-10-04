@@ -225,7 +225,7 @@ def test_packaged_runtime_matches_contributor_sources() -> None:
         (source / "password-once.sh", runtime.joinpath("password-once.sh")),
     ]
     for local in (source / "ansible").rglob("*"):
-        if local.is_file():
+        if local.is_file() and "__pycache__" not in local.parts and local.suffix != ".pyc":
             packaged = runtime.joinpath("ansible")
             for part in local.relative_to(source / "ansible").parts:
                 packaged = packaged.joinpath(part)

@@ -15,9 +15,21 @@ from deploy_cli.config import (
     load_configuration,
     validate_production_isolation,
 )
-from deploy_cli.keys import ensure_deploy_key
 from deploy_cli.redaction import Redactor
 from deploy_cli.runner import AnsibleRunner, RunnerError, runtime_resources
+from deploy_cli.secret_file import secure_secret_permissions
+
+
+@pytest.fixture(autouse=True)
+def _external_secret_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted_base = tmp_path / "trusted external base"
+    trusted_base.mkdir()
+    secure_secret_permissions(trusted_base)
+    monkeypatch.setenv(
+        "ANSIBLE_DEPLOY_SECRETS_DIR", str(trusted_base / "project secrets")
+    )
 
 
 def _copy_demo(destination: Path) -> Path:
@@ -38,10 +50,9 @@ def test_project_local_config_resolves_paths_from_project_not_cwd(
     _, config = load_configuration(project, "stage")
 
     assert config.application.compose == (project / "deploy/compose.stage.yml").resolve()
-    assert config.application.env_file == (
-        project / ".deploy/environments/stage/app.env"
-    ).resolve()
-    assert config.server.ssh_key == (project / ".deploy/keys/stage_ed25519").resolve()
+    external_root = Path(os.environ["ANSIBLE_DEPLOY_SECRETS_DIR"])
+    assert config.application.env_file == external_root / "environments/stage/app.env"
+    assert config.server.ssh_key == external_root / "keys/stage_ed25519"
 
 
 def test_relative_project_path_cannot_escape_project(tmp_path: Path) -> None:
@@ -56,21 +67,21 @@ def test_relative_project_path_cannot_escape_project(tmp_path: Path) -> None:
         load_configuration(project, "stage")
 
 
-def test_relative_key_keeps_symlink_evidence_for_key_guard(tmp_path: Path) -> None:
+def test_external_key_parent_symlink_is_rejected(tmp_path: Path) -> None:
     project = _copy_demo(tmp_path)
-    real_keys = project / "real-keys"
+    external_root = Path(os.environ["ANSIBLE_DEPLOY_SECRETS_DIR"])
+    external_root.mkdir()
+    secure_secret_permissions(external_root)
+    real_keys = tmp_path / "real-keys"
     real_keys.mkdir()
-    key_parent = project / ".deploy/keys"
+    key_parent = external_root / "keys"
     try:
         key_parent.symlink_to(real_keys, target_is_directory=True)
     except OSError:
         pytest.skip("directory symlinks are unavailable")
 
-    _, config = load_configuration(project, "stage")
-
-    assert config.server.ssh_key == project / ".deploy/keys/stage_ed25519"
-    with pytest.raises(ConfigurationError, match="symlink"):
-        ensure_deploy_key(config)
+    with pytest.raises(ConfigurationError, match="Invalid schema v2 SSH private key"):
+        load_configuration(project, "stage")
 
 
 def test_absolute_application_alias_is_canonicalized_for_isolation(tmp_path: Path) -> None:
@@ -88,35 +99,26 @@ def test_absolute_application_alias_is_canonicalized_for_isolation(tmp_path: Pat
         validate_production_isolation(project, prod)
 
 
-def test_all_application_input_paths_are_canonicalized(tmp_path: Path) -> None:
+def test_schema_v2_application_input_paths_are_resolved(tmp_path: Path) -> None:
     project = _copy_demo(tmp_path)
-    secrets = project / "secrets"
-    secrets.mkdir()
-    env = secrets / "stage.env"
-    registry = secrets / "registry.json"
-    env.write_text("APP_ENV=stage\n", encoding="utf-8")
-    registry.write_text('{"auths": {}}\n', encoding="utf-8")
-    env_alias = project / "deploy/env-link"
-    try:
-        env_alias.symlink_to(env)
-    except OSError:
-        pytest.skip("file symlinks are unavailable")
+    external_root = Path(os.environ["ANSIBLE_DEPLOY_SECRETS_DIR"])
     config_path = project / ".deploy/environments/stage/config.yml"
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     raw["application"]["compose"] = str(
         project / "deploy" / ".." / "deploy" / "compose.stage.yml"
     )
-    raw["application"]["env_file"] = "deploy/env-link"
-    raw["application"]["registry_auth_file"] = str(
-        secrets / ".." / "secrets" / "registry.json"
-    )
+    raw["application"]["env_file"] = "environments/stage/app.env"
+    raw["application"]["registry_auth_file"] = "environments/stage/registry.json"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     _, config = load_configuration(project, "stage")
 
     assert config.application.compose == (project / "deploy/compose.stage.yml").resolve()
-    assert config.application.env_file == env.resolve()
-    assert config.application.registry_auth_file == registry.resolve()
+    assert config.application.env_file == external_root / "environments/stage/app.env"
+    assert (
+        config.application.registry_auth_file
+        == external_root / "environments/stage/registry.json"
+    )
 
 
 def test_application_symlink_alias_is_canonicalized_for_isolation(tmp_path: Path) -> None:

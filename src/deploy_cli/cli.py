@@ -20,6 +20,7 @@ from .config import (
 from .images import publish_images
 from .keys import ensure_deploy_key
 from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
+from .project import ProjectError, ProjectSyncResult, sync_project
 from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
 from .secret_store import SecretStoreError, create_project_id, external_secret_root
@@ -49,6 +50,13 @@ def _parser() -> argparse.ArgumentParser:
     project.add_argument("--repo", dest="project_dir", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
+    project_command = sub.add_parser("project", help="Initialize or update project files")
+    project_sub = project_command.add_subparsers(dest="project_command", required=True)
+    project_sub.add_parser("init", help="Create a commit-safe deployment scaffold")
+    project_sync = project_sub.add_parser("sync", help="Update managed scaffold files")
+    project_sync.add_argument(
+        "--check", action="store_true", help="report pending updates without writing files"
+    )
     for environment, label in (("stage", "Stage"), ("prod", "Production")):
         deploy_parser = sub.add_parser(environment, help=f"Provision and deploy {label}")
         deploy_parser.add_argument("--dry-run", action="store_true")
@@ -106,6 +114,20 @@ def _parser() -> argparse.ArgumentParser:
         help="create or replace .deploy/project-id without copying secrets",
     )
     return parser
+
+
+def _print_project_result(result: ProjectSyncResult) -> None:
+    for path in result.created:
+        print(f"[CREATE] {path.as_posix()}")
+    for path in result.updated:
+        print(f"[UPDATE] {path.as_posix()}")
+    for path, candidate in result.conflicts:
+        print(
+            f"[CONFLICT] {path.as_posix()} was modified; review {candidate.as_posix()}",
+            file=sys.stderr,
+        )
+    if not result.changes_required:
+        print("[OK] Project scaffold is up to date")
 
 
 def _deployment_version(repo: Path, supplied: str | None) -> str:
@@ -203,6 +225,13 @@ def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     project_dir = args.project_dir.resolve()
     try:
+        if args.command == "project":
+            result = sync_project(
+                project_dir,
+                check=args.project_command == "sync" and args.check,
+            )
+            _print_project_result(result)
+            return 1 if result.conflicts or (result.check and result.changes_required) else 0
         if args.command == "secrets":
             if args.new_project_id:
                 create_project_id(project_dir)
@@ -413,7 +442,7 @@ def run(argv: list[str] | None = None) -> int:
                 update_failures[0][1].exit_code,
             )
         return 0
-    except (ConfigurationError, SecretStoreError) as exc:
+    except (ConfigurationError, ProjectError, SecretStoreError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
     except RunnerError as exc:

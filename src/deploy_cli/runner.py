@@ -6,7 +6,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
+from collections import deque
 from collections.abc import Sequence
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -15,6 +17,9 @@ from pathlib import Path, PurePosixPath
 from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .redaction import Redactor
 from .secret_store import SecretStoreError, validate_external_file_for_use
+
+RUNTIME_IMAGE = "ansible-deploy:local"
+RUNTIME_HASH_LABEL = "io.ansible-deploy.runtime-sha256"
 
 
 class RunnerError(RuntimeError):
@@ -52,13 +57,51 @@ class AnsibleRunner:
         self._pending_external_mounts: list[tuple[str, Path, bool]] = []
 
     def build_image(self) -> None:
+        runtime_hash = _resource_tree_hash(runtime_resources())
+        if self._image_has_runtime_hash(runtime_hash):
+            print(f"[CACHE] runtime image {runtime_hash[:12]} is current", file=sys.stderr)
+            return
         with tempfile.TemporaryDirectory(prefix="ansible-deploy-runtime-") as directory:
             context = Path(directory)
             _copy_resource_tree(runtime_resources(), context)
             self._run(
-                ["docker", "build", "-t", "ansible-deploy:local", str(context)],
+                [
+                    "docker",
+                    "build",
+                    "--progress",
+                    "plain",
+                    "--label",
+                    f"{RUNTIME_HASH_LABEL}={runtime_hash}",
+                    "-t",
+                    RUNTIME_IMAGE,
+                    str(context),
+                ],
                 exit_code=5,
             )
+
+    def _image_has_runtime_hash(self, runtime_hash: str) -> bool:
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed executable and argument vector
+                [  # noqa: S607 - standard Docker executable
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    f'{{{{ index .Config.Labels "{RUNTIME_HASH_LABEL}" }}}}',
+                    RUNTIME_IMAGE,
+                ],
+                cwd=self.repo,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0 and result.stdout.strip() == runtime_hash
 
     def trust_host(self, host: str, port: int, expected_fingerprints: list[str]) -> None:
         self.state_dir = prepare_state_directory(self.project_dir, self.environment)
@@ -234,6 +277,10 @@ class AnsibleRunner:
             command[2:2] = ["--name", container_name]
         process: subprocess.Popen[str] | None = None
         completed = False
+        started = time.monotonic()
+        step = _command_step(command)
+        print(f"[RUN] {step}", file=sys.stderr)
+        buffered_output: deque[str] = deque(maxlen=400)
         try:
             if container_name is not None and self._pending_external_mounts:
                 _before_subprocess_launch()
@@ -247,7 +294,12 @@ class AnsibleRunner:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=os.environ.copy(),
+                env=dict(
+                    os.environ,
+                    ANSIBLE_NOCOLOR="1",
+                    BUILDKIT_PROGRESS="plain",
+                    NO_COLOR="1",
+                ),
             )
             if process.stdout is None:
                 raise RunnerError("Runtime output pipe was not created", exit_code)
@@ -257,11 +309,23 @@ class AnsibleRunner:
                 process.stdin.write(stdin_text)
                 process.stdin.close()
             for line in process.stdout:
-                print(self.redactor(line), end="", file=sys.stderr)
+                safe_line = self.redactor(line)
+                if self.verbose:
+                    print(safe_line, end="", file=sys.stderr)
+                else:
+                    buffered_output.append(safe_line)
             result = process.wait()
             completed = True
             if result:
+                print(
+                    f"[FAIL] {step} ({time.monotonic() - started:.1f}s, code {result})",
+                    file=sys.stderr,
+                )
+                if buffered_output:
+                    print("[DETAIL] bounded failure output follows", file=sys.stderr)
+                    print("".join(buffered_output), end="", file=sys.stderr)
                 raise RunnerError(f"Ansible runtime failed with code {result}", exit_code)
+            print(f"[DONE] {step} ({time.monotonic() - started:.1f}s)", file=sys.stderr)
         except RunnerError:
             raise
         except (OSError, subprocess.SubprocessError) as exc:
@@ -327,6 +391,40 @@ def _fingerprint(known_host_line: str) -> str:
 def runtime_resources() -> Traversable:
     """Return the runtime tree shipped in both wheels and editable installs."""
     return resources.files("deploy_cli").joinpath("runtime")
+
+
+def _resource_tree_hash(source: Traversable) -> str:
+    """Hash packaged runtime names and bytes in a platform-independent order."""
+    if not source.is_dir():
+        raise RunnerError("Packaged Ansible runtime assets are missing", 5)
+    digest = hashlib.sha256()
+
+    def visit(directory: Traversable, prefix: PurePosixPath) -> None:
+        for item in sorted(directory.iterdir(), key=lambda entry: entry.name):
+            relative = prefix / item.name
+            if item.is_dir():
+                visit(item, relative)
+            elif item.is_file():
+                digest.update(relative.as_posix().encode("utf-8"))
+                digest.update(b"\0")
+                with item.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                digest.update(b"\0")
+
+    visit(source, PurePosixPath())
+    return digest.hexdigest()
+
+
+def _command_step(command: Sequence[str]) -> str:
+    if command[:2] == ["docker", "build"]:
+        return "build runtime image"
+    if command[:2] == ["docker", "run"]:
+        for argument in command:
+            if argument.startswith("/opt/ansible-deploy/ansible/playbooks/"):
+                return f"run {PurePosixPath(argument).name}"
+        return "run deployment runtime"
+    return "run deployment command"
 
 
 def _is_reparse_path(path: Path) -> bool:

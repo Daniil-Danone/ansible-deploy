@@ -99,7 +99,7 @@ def test_bootstrap_password_is_stdin_only_and_redacted(
 
         @staticmethod
         def wait() -> int:
-            return 0
+            return 1
 
         @staticmethod
         def poll() -> int:
@@ -112,7 +112,8 @@ def test_bootstrap_password_is_stdin_only_and_redacted(
 
     monkeypatch.setattr(subprocess, "Popen", popen)
     runner = AnsibleRunner(tmp_path, Redactor([password]))
-    runner.playbook("bootstrap.yml", inventory, {}, key, bootstrap_password=password)
+    with pytest.raises(RunnerError, match="failed with code 1"):
+        runner.playbook("bootstrap.yml", inventory, {}, key, bootstrap_password=password)
 
     command = captured["args"]
     assert isinstance(command, list)
@@ -125,6 +126,41 @@ def test_bootstrap_password_is_stdin_only_and_redacted(
     output = capsys.readouterr().err
     assert password not in output
     assert "[REDACTED]" in output
+    assert "[RUN] run bootstrap.yml" in output
+    assert "[FAIL] run bootstrap.yml" in output
+    assert "\x1b" not in output
+
+
+@pytest.mark.parametrize("verbose, raw_visible", [(False, False), (True, True)])
+def test_success_output_is_phase_only_unless_verbose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    verbose: bool,
+    raw_visible: bool,
+) -> None:
+    class Process:
+        stdout = StringIO("raw ansible detail\n")
+        stdin = None
+
+        @staticmethod
+        def wait() -> int:
+            return 0
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: Process())
+    runner = AnsibleRunner(tmp_path, Redactor([]), verbose=verbose)
+
+    runner._run(["docker", "build", "context"], exit_code=5)
+
+    output = capsys.readouterr().err
+    assert ("raw ansible detail" in output) is raw_visible
+    assert "[RUN] build runtime image" in output
+    assert "[DONE] build runtime image" in output
+    assert "\x1b" not in output
 
 
 def test_interrupted_runtime_is_terminated_and_reaped(

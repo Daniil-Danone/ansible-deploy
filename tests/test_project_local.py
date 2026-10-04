@@ -242,6 +242,7 @@ def test_runtime_build_uses_ephemeral_minimal_context(
     project = _copy_demo(tmp_path)
     runner = AnsibleRunner(project, Redactor([]))
     observed: dict[str, object] = {}
+    monkeypatch.setattr(runner, "_image_has_runtime_hash", lambda _digest: False)
 
     def inspect(args, *, exit_code, stdin_text=None):
         del exit_code, stdin_text
@@ -264,6 +265,57 @@ def test_runtime_build_uses_ephemeral_minimal_context(
     assert "ansible/playbooks/site.yml" in files
     assert not any(name.startswith(".deploy/") for name in files)
     assert not any(name.startswith("backend/") for name in files)
+
+
+def test_runtime_build_reuses_image_with_matching_content_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _copy_demo(tmp_path)
+    runner = AnsibleRunner(project, Redactor([]))
+    observed_hashes: list[str] = []
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        runner,
+        "_image_has_runtime_hash",
+        lambda digest: observed_hashes.append(digest) or True,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda args, **_kwargs: commands.append(list(args)),
+    )
+
+    runner.build_image()
+
+    assert len(observed_hashes) == 1
+    assert len(observed_hashes[0]) == 64
+    assert commands == []
+
+
+def test_runtime_build_label_changes_when_packaged_asset_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _copy_demo(tmp_path)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    runner = AnsibleRunner(project, Redactor([]))
+    commands: list[list[str]] = []
+    monkeypatch.setattr("deploy_cli.runner.runtime_resources", lambda: runtime)
+    monkeypatch.setattr(runner, "_image_has_runtime_hash", lambda _digest: False)
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda args, **_kwargs: commands.append(list(args)),
+    )
+
+    runner.build_image()
+    first_label = commands[-1][commands[-1].index("--label") + 1]
+    (runtime / "Dockerfile").write_text("FROM busybox\n", encoding="utf-8")
+    runner.build_image()
+    second_label = commands[-1][commands[-1].index("--label") + 1]
+
+    assert first_label != second_label
 
 
 def test_playbook_mounts_only_addressed_project_inputs(

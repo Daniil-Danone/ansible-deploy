@@ -320,22 +320,17 @@ def _pair_lock(path: Path) -> Iterator[None]:
 
 
 def _publish_pair_lock(path: Path) -> None:
-    if path.exists():
-        return
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.init-", dir=path.parent)
-    temporary = Path(name)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        secure_secret_permissions(temporary)
-        os.close(descriptor)
-        descriptor = -1
-        try:
-            os.link(temporary, path, follow_symlinks=False)
-        except FileExistsError:
-            pass
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return
+    try:
+        secure_secret_permissions(path)
     finally:
-        temporary.unlink(missing_ok=True)
-        if descriptor >= 0:
-            os.close(descriptor)
+        os.close(descriptor)
 
 
 def _rollback_published_keys(

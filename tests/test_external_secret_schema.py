@@ -1,3 +1,4 @@
+import base64
 import os
 import shutil
 import stat
@@ -468,7 +469,9 @@ def test_sensitive_read_failure_is_generic_across_validator_workflow_and_cli(
     _write_external_file(
         config,
         config.application.registry_auth_file,
-        b'{"auths":{"https://index.docker.io/v1/":{"auth":"dXNlcjp0b2tlbg=="}}}\n',
+        b'{"auths":{"https://index.docker.io/v1/":{"auth":"'
+        + base64.b64encode(b"user:token")
+        + b'"}}}\n',
     )
     original_read_bytes = Path.read_bytes
 
@@ -658,7 +661,7 @@ def test_registry_validation_suppresses_operational_exception_chain(
     _, config = load_configuration(project, "stage")
     marker = f"DO-NOT-DISCLOSE-registry-{failure_point}"
     sensitive_path = str(config.application.registry_auth_file)
-    encoded = "dXNlcjp0b2tlbg=="
+    encoded = base64.b64encode(b"user:token").decode("ascii")
     if failure_point == "read":
         monkeypatch.setattr(
             config_module,

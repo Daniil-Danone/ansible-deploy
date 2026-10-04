@@ -8,10 +8,16 @@ import subprocess
 import tempfile
 from ctypes import wintypes
 from pathlib import Path
+from typing import Any
 
 
 class SecretFileError(ValueError):
     """A secret file is not protected for the current platform."""
+
+
+def _windows_library(name: str) -> Any:
+    windows_ctypes: Any = ctypes
+    return windows_ctypes.WinDLL(name, use_last_error=True)
 
 
 def secure_secret_permissions(path: Path) -> None:
@@ -25,8 +31,8 @@ def secure_secret_permissions(path: Path) -> None:
 
 
 def _set_windows_owner_only_acl(path: Path, sid: str) -> None:
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = _windows_library("advapi32")
+    kernel32 = _windows_library("kernel32")
     descriptor = ctypes.c_void_p()
     descriptor_size = wintypes.ULONG()
     convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW

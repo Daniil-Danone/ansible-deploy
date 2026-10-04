@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 
 from .secret_file import (
     SecretFileError,
@@ -26,6 +27,16 @@ _O_NOFOLLOW = int(getattr(os, "O_NOFOLLOW", 0))
 
 class SecretStoreError(ValueError):
     """Raised when project identity or secret-store location is unsafe."""
+
+
+def _windows_library(name: str) -> Any:
+    windows_ctypes: Any = ctypes
+    return windows_ctypes.WinDLL(name, use_last_error=True)
+
+
+def _windows_last_error() -> int:
+    windows_ctypes: Any = ctypes
+    return int(windows_ctypes.get_last_error())
 
 
 @dataclass(frozen=True)
@@ -633,7 +644,7 @@ class _FileAttributeTagInfo(ctypes.Structure):
 
 
 def _windows_open(path: Path, *, directory: bool) -> int:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _windows_library("kernel32")
     create_file = kernel32.CreateFileW
     create_file.argtypes = [
         wintypes.LPCWSTR,
@@ -662,7 +673,7 @@ def _windows_open(path: Path, *, directory: bool) -> int:
     )
     invalid_handle = ctypes.c_void_p(-1).value
     if handle == invalid_handle:
-        error = ctypes.get_last_error()
+        error = _windows_last_error()
         if error in {2, 3}:
             raise FileNotFoundError(path)
         raise OSError(error, f"Unable to open {path.name}")
@@ -670,16 +681,16 @@ def _windows_open(path: Path, *, directory: bool) -> int:
 
 
 def _windows_close(handle: int) -> None:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _windows_library("kernel32")
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
     if not close_handle(wintypes.HANDLE(handle)):
-        raise OSError(ctypes.get_last_error(), "Unable to close Windows file handle")
+        raise OSError(_windows_last_error(), "Unable to close Windows file handle")
 
 
 def _windows_attributes(handle: int) -> int:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _windows_library("kernel32")
     get_information = kernel32.GetFileInformationByHandleEx
     get_information.argtypes = [
         wintypes.HANDLE,
@@ -696,13 +707,13 @@ def _windows_attributes(handle: int) -> int:
         ctypes.byref(information),
         ctypes.sizeof(information),
     ):
-        raise OSError(ctypes.get_last_error(), "Unable to inspect Windows file handle")
+        raise OSError(_windows_last_error(), "Unable to inspect Windows file handle")
     return int(information.file_attributes)
 
 
 def _windows_owner_sid(handle: int) -> str:
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = _windows_library("advapi32")
+    kernel32 = _windows_library("kernel32")
     owner = ctypes.c_void_p()
     descriptor = ctypes.c_void_p()
     get_security = advapi32.GetSecurityInfo
@@ -740,7 +751,7 @@ def _windows_owner_sid(handle: int) -> str:
     local_free.restype = wintypes.HLOCAL
     try:
         if not convert_sid(owner, ctypes.byref(sid_text)):
-            raise OSError(ctypes.get_last_error(), "Unable to format external path owner")
+            raise OSError(_windows_last_error(), "Unable to format external path owner")
         value = sid_text.value
         if value is None:
             raise OSError("Unable to format external path owner")
@@ -800,7 +811,7 @@ def _windows_load_project_id(project: Path) -> uuid.UUID:
             _windows_validate_handle(handle, directory=False)
             buffer = ctypes.create_string_buffer(_MAX_IDENTITY_SIZE + 1)
             read = wintypes.DWORD()
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = _windows_library("kernel32")
             read_file = kernel32.ReadFile
             read_file.argtypes = [
                 wintypes.HANDLE,
@@ -817,7 +828,7 @@ def _windows_load_project_id(project: Path) -> uuid.UUID:
                 ctypes.byref(read),
                 None,
             ):
-                raise OSError(ctypes.get_last_error(), "Unable to read project identity")
+                raise OSError(_windows_last_error(), "Unable to read project identity")
             return _parse_project_id(buffer.raw[: read.value])
         except OSError:
             raise SecretStoreError("Unable to read project identity") from None

@@ -7,6 +7,8 @@ from pathlib import Path
 import yaml
 
 from deploy_cli import cli
+from deploy_cli.config import load_configuration
+from deploy_cli.models import EnvironmentConfig
 from deploy_cli.project import STATE_PATH, sync_project
 
 
@@ -21,6 +23,25 @@ def test_init_is_idempotent_and_creates_all_environment_skeletons(tmp_path: Path
     assert (tmp_path / STATE_PATH).read_bytes() == first_state
     for environment in ("stage", "prod", "monitoring", "restore"):
         assert (tmp_path / f".deploy/environments/{environment}/config.yml").is_file()
+
+
+def test_generated_scaffold_loads_every_environment_and_has_complete_disabled_backup(
+    tmp_path: Path,
+) -> None:
+    assert cli.run(["--project-dir", str(tmp_path), "project", "init"]) == 0
+
+    loaded = {
+        environment: load_configuration(tmp_path, environment)[1]
+        for environment in ("stage", "prod", "monitoring", "restore")
+    }
+
+    prod = loaded["prod"]
+    restore = loaded["restore"]
+    assert isinstance(prod, EnvironmentConfig)
+    assert prod.backup is not None
+    assert prod.backup.enabled is False
+    assert isinstance(restore, EnvironmentConfig)
+    assert restore.source_environment == "prod"
 
 
 def test_sync_adds_missing_environments_to_stage_only_project(tmp_path: Path) -> None:

@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
+import stat
 import tarfile
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from deploy_cli.cli import run as cli_run
 from deploy_cli.config import ConfigurationError, validate_restore_isolation
-from deploy_cli.models import BackupConfig
+from deploy_cli.models import BackupConfig, BackupRetention, EnvironmentConfig
 
 
 def _runtime() -> ModuleType:
@@ -55,18 +59,29 @@ def test_upload_uses_partial_then_verifies_final(
 
     def fake_rclone(config: dict[str, object], *arguments: str) -> str:
         calls.append(arguments)
+        if arguments[0] == "lsjson":
+            return "[]"
         if arguments[0] == "size":
             return json.dumps({"bytes": artifact.stat().st_size})
+        if arguments[0] == "copyto" and arguments[1].startswith("drive:"):
+            Path(arguments[2]).write_bytes(artifact.read_bytes())
         return ""
 
     monkeypatch.setattr(runtime, "_rclone", fake_rclone)
     runtime.upload_verified({"remote": "drive:backups"}, artifact, artifact.name)
 
     assert calls == [
+        ("lsjson", "drive:backups", "--files-only", "--recursive"),
         ("copyto", str(artifact), "drive:backups/.partial/backup.age.partial"),
         ("size", "drive:backups/.partial/backup.age.partial", "--json"),
-        ("moveto", "drive:backups/.partial/backup.age.partial", "drive:backups/backup.age"),
+        (
+            "moveto",
+            "drive:backups/.partial/backup.age.partial",
+            "drive:backups/backup.age",
+            "--immutable",
+        ),
         ("size", "drive:backups/backup.age", "--json"),
+        ("copyto", "drive:backups/backup.age", calls[-1][2]),
     ]
 
 
@@ -78,6 +93,8 @@ def test_upload_rejects_partial_size_mismatch(
     artifact.write_bytes(b"encrypted")
 
     def fake_rclone(config: dict[str, object], *arguments: str) -> str:
+        if arguments[0] == "lsjson":
+            return "[]"
         return json.dumps({"bytes": 1}) if arguments[0] == "size" else ""
 
     monkeypatch.setattr(runtime, "_rclone", fake_rclone)
@@ -95,11 +112,24 @@ def test_restore_rejects_tampered_encrypted_artifact(
             target = Path(arguments[2])
             if target.name.endswith(".sha256"):
                 target.write_text("0" * 64 + "  backup.age\n", encoding="ascii")
+            elif target.name.endswith(".json"):
+                target.write_text(
+                    json.dumps(
+                        {
+                            "artifact": "2026-10-05T010203Z.tar.gz.age",
+                            "backup_id": "2026-10-05T010203Z",
+                            "sha256": "0" * 64,
+                            "size": len(b"tampered"),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
             else:
                 target.write_bytes(b"tampered")
         return ""
 
     monkeypatch.setattr(runtime, "_rclone", fake_rclone)
+    monkeypatch.setattr(runtime, "remote_ids", lambda config: ["2026-10-05T010203Z"])
     with pytest.raises(runtime.BackupFailure, match="checksum"):
         runtime.restore(
             {
@@ -161,9 +191,237 @@ def test_backup_config_requires_safe_declarative_sources() -> None:
                 "credentials_file": "backup/rclone.conf",
                 "age_identity_file": "backup/age.key",
                 "age_recipient": "age1" + "a" * 58,
-                "include": [{"type": "directory", "path": "../uploads"}],
+                "include": [
+                    {
+                        "type": "directory",
+                        "path": "../uploads",
+                        "restore_destination": "shared/uploads",
+                    }
+                ],
             }
         )
+
+
+def test_backup_restore_destination_must_be_safe_relative_path() -> None:
+    with pytest.raises(ValueError, match="restore_destination"):
+        BackupConfig.model_validate(
+            {
+                "remote": "gdrive:backups/production",
+                "credentials_file": "backup/rclone.conf",
+                "age_identity_file": "backup/age.key",
+                "age_recipient": "age1" + "a" * 58,
+                "include": [
+                    {
+                        "type": "directory",
+                        "path": "/srv/prod/uploads",
+                        "restore_destination": "../prod/uploads",
+                    }
+                ],
+            }
+        )
+
+
+def test_backup_restore_destinations_must_not_overlap() -> None:
+    with pytest.raises(ValueError, match="must not overlap"):
+        BackupConfig.model_validate(
+            {
+                "remote": "gdrive:backups/production",
+                "credentials_file": "backup/rclone.conf",
+                "age_identity_file": "backup/age.key",
+                "age_recipient": "age1" + "a" * 58,
+                "include": [
+                    {
+                        "type": "directory",
+                        "path": "/srv/prod/uploads",
+                        "restore_destination": "shared",
+                    },
+                    {
+                        "type": "file",
+                        "path": "/srv/prod/avatar.png",
+                        "restore_destination": "shared/avatar.png",
+                    },
+                ],
+            }
+        )
+
+
+def test_retention_rejects_all_zero_policy() -> None:
+    with pytest.raises(ValueError, match="keep at least one"):
+        BackupRetention.model_validate({"daily": 0, "weekly": 0, "monthly": 0})
+
+
+def test_source_environment_is_required_only_for_restore() -> None:
+    root = Path(__file__).parents[1] / "src/deploy_cli/templates/project/.deploy/environments"
+    restore = yaml.safe_load((root / "restore/config.yml").read_text(encoding="utf-8"))
+    stage = yaml.safe_load((root / "stage/config.yml").read_text(encoding="utf-8"))
+    restore.pop("source_environment")
+    stage["source_environment"] = "prod"
+
+    with pytest.raises(ValidationError, match="requires source_environment"):
+        EnvironmentConfig.model_validate(restore)
+    with pytest.raises(ValidationError, match="only valid for restore"):
+        EnvironmentConfig.model_validate(stage)
+
+
+def test_runtime_retention_rejects_all_zero_and_protects_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    current = "2026-10-05T010203Z-0123456789abcdef"
+    old = "2026-09-05T010203Z-fedcba9876543210"
+    monkeypatch.setattr(runtime, "remote_ids", lambda config: [old, current])
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        runtime,
+        "_rclone",
+        lambda config, *args: deleted.append(args[1]) or "",
+    )
+    config = {
+        "remote": "drive:backups",
+        "retention": {"daily": 0, "weekly": 0, "monthly": 1},
+    }
+
+    runtime.apply_retention(config, current=current)
+
+    assert all(current not in path for path in deleted)
+
+
+def test_source_hardlink_is_rejected_before_archive(tmp_path: Path) -> None:
+    runtime = _runtime()
+    source = tmp_path / "source"
+    alias = tmp_path / "alias"
+    source.write_text("data", encoding="utf-8")
+    try:
+        os.link(source, alias)
+    except OSError:
+        pytest.skip("hard links are unavailable")
+
+    with pytest.raises(runtime.BackupFailure, match="hard links"):
+        runtime._selected_paths(
+            {
+                "type": "file",
+                "path": str(source),
+                "restore_destination": "/srv/restore/source",
+            }
+        )
+
+
+def test_existing_destination_hardlink_is_rejected(tmp_path: Path) -> None:
+    runtime = _runtime()
+    target = tmp_path / "target"
+    alias = tmp_path / "alias"
+    target.write_text("unchanged", encoding="utf-8")
+    try:
+        os.link(target, alias)
+    except OSError:
+        pytest.skip("hard links are unavailable")
+
+    with pytest.raises(runtime.BackupFailure, match="hard links"):
+        runtime._safe_destination(tmp_path, runtime.PurePosixPath("target"))
+    assert alias.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_restore_file_preserves_mode_mtime_and_is_writable(tmp_path: Path) -> None:
+    runtime = _runtime()
+    archive_path = tmp_path / "archive.tar"
+    member = tarfile.TarInfo("files/0/0/source.txt")
+    member.size = len(b"payload")
+    member.mode = 0o660
+    member.mtime = 1_700_000_000
+    with tarfile.open(archive_path, "w") as archive:
+        archive.addfile(member, io.BytesIO(b"payload"))
+    target = tmp_path / "restore" / "target.txt"
+
+    with tarfile.open(archive_path) as archive:
+        runtime._restore_file(archive, archive.getmembers()[0], target)
+
+    metadata = target.stat()
+    if os.name != "nt":
+        assert stat.S_IMODE(metadata.st_mode) == 0o660
+    assert int(metadata.st_mtime) == member.mtime
+    with target.open("a", encoding="utf-8") as stream:
+        stream.write("!")
+    assert target.read_text(encoding="utf-8") == "payload!"
+
+
+def test_remote_list_requires_valid_manifest_and_complete_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    complete = "2026-10-05T010203Z-0123456789abcdef"
+    orphan = "2026-10-05T020304Z-fedcba9876543210"
+    names = {
+        f"{complete}.tar.gz.age",
+        f"{complete}.tar.gz.age.sha256",
+        f"{complete}.json",
+        f"{orphan}.tar.gz.age",
+    }
+    monkeypatch.setattr(runtime, "_remote_names", lambda config: names)
+    monkeypatch.setattr(
+        runtime,
+        "_read_remote_json",
+        lambda config, name: {
+            "artifact": f"{complete}.tar.gz.age",
+            "backup_id": complete,
+            "sha256": "a" * 64,
+            "size": 10,
+        },
+    )
+    monkeypatch.setattr(runtime, "_read_remote_text", lambda config, name: "a" * 64)
+    monkeypatch.setattr(runtime, "_remote_size", lambda config, name: 10)
+
+    assert runtime.remote_ids({"remote": "drive:backups"}) == [complete]
+
+
+def test_upload_rejects_existing_final_without_overwrite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _runtime()
+    artifact = tmp_path / "backup.age"
+    artifact.write_bytes(b"new")
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(runtime, "_remote_names", lambda config: {artifact.name})
+    monkeypatch.setattr(
+        runtime, "_rclone", lambda config, *args: calls.append(args) or ""
+    )
+
+    with pytest.raises(runtime.BackupFailure, match="immutable"):
+        runtime.upload_verified({"remote": "drive:backups"}, artifact, artifact.name)
+    assert calls == []
+
+
+def test_remote_checksum_detects_same_size_corruption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _runtime()
+    artifact = tmp_path / "backup.age"
+    artifact.write_bytes(b"good")
+
+    def fake_rclone(config: dict[str, object], *arguments: str) -> str:
+        if arguments[0] == "lsjson":
+            return "[]"
+        if arguments[0] == "size":
+            return json.dumps({"bytes": 4})
+        if arguments[0] == "copyto" and arguments[1].startswith("drive:"):
+            Path(arguments[2]).write_bytes(b"evil")
+        return ""
+
+    monkeypatch.setattr(runtime, "_rclone", fake_rclone)
+    with pytest.raises(runtime.BackupFailure, match="checksum"):
+        runtime.upload_verified({"remote": "drive:backups"}, artifact, artifact.name)
+
+
+def test_new_backup_ids_have_nonce_and_are_unique(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = _runtime()
+    values = iter(["0" * 16, "1" * 16])
+    monkeypatch.setattr(runtime.secrets, "token_hex", lambda count: next(values))
+
+    first = runtime._new_backup_id()
+    second = runtime._new_backup_id()
+
+    assert first != second
+    assert runtime._valid_id(first)
+    assert runtime._valid_id(second)
 
 
 def test_cli_rejects_production_restore_target_with_exit_8(
@@ -226,8 +484,11 @@ def test_backup_with_fake_age_and_rclone_is_verified_and_idempotent(
     def fake_rclone(config: dict[str, object], *arguments: str) -> str:
         action = arguments[0]
         if action == "copyto":
-            target = remote / Path(arguments[2]).name
-            shutil.copyfile(arguments[1], target)
+            if arguments[1].startswith("drive:"):
+                shutil.copyfile(remote / Path(arguments[1]).name, arguments[2])
+            else:
+                target = remote / Path(arguments[2]).name
+                shutil.copyfile(arguments[1], target)
         elif action == "size":
             return json.dumps({"bytes": (remote / Path(arguments[1]).name).stat().st_size})
         elif action == "moveto":
@@ -243,8 +504,15 @@ def test_backup_with_fake_age_and_rclone_is_verified_and_idempotent(
     config = {
         "age_recipient": "age1" + "a" * 58,
         "compose_file": "/unused",
-        "include": [{"type": "file", "path": str(source)}],
+        "include": [
+            {
+                "type": "file",
+                "path": str(source),
+                "restore_destination": str(tmp_path / "restored.txt"),
+            }
+        ],
         "remote": "drive:backups",
+        "result_file": str(tmp_path / "last-result.json"),
         "retention": {"daily": 7, "weekly": 4, "monthly": 6},
     }
 

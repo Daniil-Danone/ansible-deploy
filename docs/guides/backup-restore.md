@@ -3,6 +3,32 @@
 Production backup описывается секцией `backup` в
 `.deploy/environments/prod/config.yml`. Config commit-safe; реальные
 `backup/rclone.conf` и `backup/age.key` находятся во внешнем secret store.
+Сгенерированный scaffold содержит полную, но выключенную (`enabled: false`)
+секцию. Перед включением замените remote/recipient и настройте источники:
+
+```yaml
+backup:
+  enabled: true
+  schedule: "03:15"
+  remote: gdrive:backups/production
+  credentials_file: backup/rclone.conf
+  age_identity_file: backup/age.key
+  age_recipient: age1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  include:
+    - type: directory
+      path: /srv/myapp-prod/shared/uploads
+      restore_destination: shared/uploads
+  retention:
+    daily: 7
+    weekly: 4
+    monthly: 6
+```
+
+`restore_destination` обязателен для `file`, `directory` и `glob`, задаётся
+нормализованным относительным путём и разрешается внутри
+`application.remote_dir` выбранного Restore-окружения. Поэтому Production-путь
+никогда не переиспользуется на Restore VPS. Для `postgres` destination не нужен.
+Хотя бы одно retention-окно должно быть ненулевым.
 
 Минимальный порядок:
 
@@ -20,9 +46,11 @@ deploy backup restore prod --target restore --backup BACKUP_ID
 
 ## Restore Drill
 
-`restore` — отдельное окружение в `.deploy/environments/restore/config.yml` с отдельным
-VPS, remote directory, SSH key и runtime secrets. Source остаётся `prod`; target `prod`
-для drill запрещён.
+`restore` — отдельное окружение в `.deploy/environments/restore/config.yml` с
+`source_environment: prod`, отдельным VPS, remote directory, SSH key и runtime
+secrets. Source остаётся `prod`; target `prod` для drill запрещён. Команда сама
+идемпотентно подготавливает чистый Ubuntu VPS тем же bootstrap/deploy flow; для
+password-only bootstrap используйте `--ask-bootstrap-password`.
 
 1. Создайте/проверьте отдельный Restore VPS и DNS.
 2. Получите список и выберите backup ID.

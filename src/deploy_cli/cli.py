@@ -23,7 +23,7 @@ from .config import (
 )
 from .images import publish_images
 from .keys import ensure_deploy_key
-from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
+from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig, is_backup_identifier
 from .project import ProjectError, ProjectSyncResult, sync_project
 from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
@@ -182,6 +182,11 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("environment", choices=["prod"])
     restore.add_argument("--target", required=True)
     restore.add_argument("--backup", required=True, dest="backup_id")
+    restore.add_argument(
+        "--ask-bootstrap-password",
+        action="store_true",
+        help="prompt securely when preparing a pristine Restore VPS",
+    )
     restore.add_argument("--yes", action="store_true")
     return parser
 
@@ -337,34 +342,58 @@ def run(argv: list[str] | None = None) -> int:
                 if backup_config is None:
                     raise ConfigurationError("Production backup is not configured")
                 if args.backup_command == "restore":
+                    if not is_backup_identifier(args.backup_id):
+                        raise ConfigurationError("Backup restore identifier is invalid")
                     _, target = load_configuration(project_dir, args.target)
                     if not isinstance(target, EnvironmentConfig) or target.environment != "restore":
                         raise ConfigurationError(
                             "Restore target must be a dedicated restore environment"
                         )
                     validate_restore_isolation(source, target)
-                    validate_local_inputs(
-                        target, require_public_key=False, require_application=False
-                    )
                     if not args.yes:
                         if not sys.stdin.isatty():
                             raise ConfigurationError(
                                 "Restore requires an interactive terminal or --yes"
                             )
-                        print(f"Restore target: host={target.server.host}, backup={args.backup_id}")
+                        print(
+                            "Restore drill: "
+                            f"source={source.environment}, target={target.environment}, "
+                            f"host={target.server.host}, backup={args.backup_id}"
+                        )
                         if input("Type 'restore' to continue: ").strip() != "restore":
                             raise ConfigurationError("Restore was not confirmed")
+                    print(f"[KEY] {ensure_deploy_key(target)}")
+                    validate_local_inputs(target)
+                    validate_compose(target)
+                    validate_environment_file(target)
+                    validate_registry_auth(target)
+                    dns_preflight(target)
                     active = target
                 else:
                     validate_local_inputs(
                         source, require_public_key=False, require_application=False
                     )
                     active = source
+                backup_bootstrap_password: str | None = None
+                backup_secret_values: set[str] = set()
+                if args.backup_command == "restore":
+                    if args.ask_bootstrap_password:
+                        backup_bootstrap_password = _prompt_bootstrap_password(
+                            active.server.bootstrap_user, active.server.host
+                        )
+                        backup_secret_values.add(backup_bootstrap_password)
+                    env_text = read_external_secret_text(
+                        active,
+                        active.application.env_file,
+                        field="application environment",
+                    )
+                    backup_secret_values.update(secrets_from_env(env_text))
                 external_context = active.external_secret_context
                 runner = AnsibleRunner(
                     project_dir,
                     Redactor(
-                        {
+                        backup_secret_values
+                        | {
                             str(backup_config.credentials_file),
                             str(backup_config.age_identity_file),
                             str(active.server.ssh_key),
@@ -390,6 +419,7 @@ def run(argv: list[str] | None = None) -> int:
                         active,
                         runner,
                         backup_id=args.backup_id,
+                        bootstrap_password=backup_bootstrap_password,
                     )
                 else:
                     backup_operation(

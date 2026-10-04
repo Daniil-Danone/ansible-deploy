@@ -5,6 +5,8 @@ from unittest.mock import Mock
 import pytest
 
 from deploy_cli.config import load_configuration
+from deploy_cli.models import BackupConfig
+from deploy_cli.project import sync_project
 from deploy_cli.runner import RunnerError
 from deploy_cli.workflow import (
     deploy,
@@ -12,6 +14,7 @@ from deploy_cli.workflow import (
     deploy_monitoring,
     deployment_manifest,
     dns_preflight,
+    restore_backup,
     write_inventory,
 )
 
@@ -44,6 +47,154 @@ def test_repeat_deploy_uses_only_managed_access(tmp_path: Path) -> None:
     assert runner.playbook.call_args_list[0].args[1].name == "managed.yml"
     assert runner.playbook.call_args_list[4].kwargs["exit_code"] == 7
     assert runner.playbook.call_args_list[3].args[2]["app_compose_project"] == "myapp"
+
+
+def test_restore_prepares_target_before_import_and_rechecks_health(tmp_path: Path) -> None:
+    repo = tmp_path / "project"
+    repo.mkdir()
+    sync_project(repo)
+    global_config, source = load_configuration(repo, "prod")
+    _, target = load_configuration(repo, "restore")
+    source.backup = BackupConfig.model_validate(
+        {
+            "remote": "drive:backups",
+            "credentials_file": str(tmp_path / "rclone.conf"),
+            "age_identity_file": str(tmp_path / "age.key"),
+            "age_recipient": "age1" + "a" * 58,
+            "include": [
+                {
+                    "type": "directory",
+                    "path": "/srv/myapp-prod/shared/uploads",
+                    "restore_destination": "shared/uploads",
+                }
+            ],
+        }
+    )
+    target_env = tmp_path / "restore.env"
+    target_env.write_text("APP_ENV=restore\n", encoding="utf-8")
+    target.schema_version = 1
+    target.application.env_file = target_env
+    target.application.registry_auth_file = None
+    runner = Mock()
+
+    restore_backup(
+        repo,
+        global_config,
+        source,
+        target,
+        runner,
+        backup_id="2026-10-05T010203Z-0123456789abcdef",
+    )
+
+    assert [call.args[0] for call in runner.playbook.call_args_list] == [
+        "verify_deploy_access.yml",
+        "guard_environment.yml",
+        "restore_prepare.yml",
+        "guard_environment.yml",
+        "backup_restore.yml",
+        "health.yml",
+    ]
+    names = [call.args[0] for call in runner.playbook.call_args_list]
+    assert names.index("health.yml") > names.index("backup_restore.yml")
+    restore_call = runner.playbook.call_args_list[4]
+    include = restore_call.args[2]["backup_runtime_config"]["include"]
+    assert include == [
+        {
+            "type": "directory",
+            "path": "/srv/myapp-prod/shared/uploads",
+            "restore_destination": "/srv/myapp-restore/shared/uploads",
+        }
+    ]
+
+
+def test_restore_bootstraps_pristine_target_before_application_and_import(tmp_path: Path) -> None:
+    repo = tmp_path / "project"
+    repo.mkdir()
+    sync_project(repo)
+    global_config, source = load_configuration(repo, "prod")
+    _, target = load_configuration(repo, "restore")
+    source.backup = BackupConfig.model_validate(
+        {
+            "remote": "drive:backups",
+            "credentials_file": str(tmp_path / "rclone.conf"),
+            "age_identity_file": str(tmp_path / "age.key"),
+            "age_recipient": "age1" + "a" * 58,
+            "include": [{"type": "postgres", "service": "db", "database": "app", "user": "app"}],
+        }
+    )
+    target_env = tmp_path / "restore.env"
+    target_env.write_text("APP_ENV=restore\n", encoding="utf-8")
+    target.schema_version = 1
+    target.application.env_file = target_env
+    target.application.registry_auth_file = None
+    runner = Mock()
+    managed_failed = False
+
+    def fail_first_managed(name, inventory, *args, **kwargs):
+        nonlocal managed_failed
+        if (
+            name == "verify_deploy_access.yml"
+            and inventory.name == "managed.yml"
+            and not managed_failed
+        ):
+            managed_failed = True
+            raise RunnerError("not bootstrapped", 4)
+
+    runner.playbook.side_effect = fail_first_managed
+
+    restore_backup(
+        repo,
+        global_config,
+        source,
+        target,
+        runner,
+        backup_id="2026-10-05T010203Z-0123456789abcdef",
+        bootstrap_password="temporary-password",  # noqa: S106 - synthetic test value
+    )
+
+    calls = runner.playbook.call_args_list
+    assert [call.args[0] for call in calls[:5]] == [
+        "verify_deploy_access.yml",
+        "verify_deploy_access.yml",
+        "guard_environment.yml",
+        "bootstrap.yml",
+        "verify_deploy_access.yml",
+    ]
+    assert [call.kwargs.get("bootstrap_password") for call in calls[:5]] == [
+        None,
+        "temporary-password",
+        "temporary-password",
+        "temporary-password",
+        None,
+    ]
+    assert [call.args[0] for call in calls[-3:]] == [
+        "guard_environment.yml",
+        "backup_restore.yml",
+        "health.yml",
+    ]
+
+
+def test_restore_rejects_unsafe_backup_id_before_runner_calls() -> None:
+    repo = Path(__file__).parents[1]
+    global_config, source = load_configuration(repo, "prod")
+    _, target_raw = load_configuration(repo, "stage")
+    target_raw.environment = "restore"
+    target_raw.source_environment = "prod"
+    source.backup = Mock()
+    runner = Mock()
+
+    with pytest.raises(RunnerError, match="identifier is invalid"):
+        restore_backup(
+            repo,
+            global_config,
+            source,
+            target_raw,
+            runner,
+            backup_id="../../production",
+        )
+
+    runner.assert_not_called()
+    runner.playbook.assert_not_called()
 
 
 def test_production_uses_separate_compose_project_name(tmp_path: Path) -> None:

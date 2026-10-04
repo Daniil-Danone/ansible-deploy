@@ -1,0 +1,75 @@
+---
+- name: Create Restore application runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0750"
+  loop:
+    - "{{ app_dir }}"
+    - "{{ app_dir }}/current"
+
+- name: Create Restore deploy user Docker configuration directory
+  ansible.builtin.file:
+    path: "/home/{{ deploy_user }}/.docker"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0700"
+  when: app_registry_auth_file | length > 0
+
+- name: Deliver Restore registry authentication securely
+  ansible.builtin.copy:
+    src: "{{ app_registry_auth_file }}"
+    dest: "/home/{{ deploy_user }}/.docker/config.json"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  no_log: true
+  when: app_registry_auth_file | length > 0
+
+- name: Deliver Restore Compose definition
+  ansible.builtin.copy:
+    src: "{{ app_compose_file }}"
+    dest: "{{ app_dir }}/current/compose.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+
+- name: Deliver Restore environment securely
+  ansible.builtin.copy:
+    src: "{{ app_env_file }}"
+    dest: "{{ app_dir }}/current/.env"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  no_log: true
+
+- name: Start Restore services without application health gating
+  block:
+    - name: Reconcile Restore services for data import
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}/current"
+        files: [compose.yml]
+        env_files: [.env]
+        project_name: "{{ app_compose_project }}"
+        pull: always
+        state: present
+        remove_orphans: true
+        wait: false
+      become_user: "{{ deploy_user }}"
+      become: true
+      no_log: true
+  rescue:
+    - name: Diagnose failed Restore service preparation
+      ansible.builtin.include_role:
+        name: compose_diagnostics
+      vars:
+        compose_diagnostic_dir: "{{ app_dir }}/current"
+        compose_diagnostic_project: "{{ app_compose_project }}"
+        compose_diagnostic_user: "{{ deploy_user }}"
+
+    - name: Preserve Restore service preparation failure
+      ansible.builtin.fail:
+        msg: "Restore Compose preparation failed; safe diagnostics are shown above"

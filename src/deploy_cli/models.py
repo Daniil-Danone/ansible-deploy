@@ -1,6 +1,7 @@
 import ipaddress
 import re
 import unicodedata
+from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -11,6 +12,20 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+
+def is_backup_identifier(value: str) -> bool:
+    match = re.fullmatch(
+        r"(?P<stamp>\d{4}-\d{2}-\d{2}T\d{6}Z)(?:-[0-9a-f]{16})?", value
+    )
+    if match is None:
+        return False
+    try:
+        return datetime.strptime(match.group("stamp"), "%Y-%m-%dT%H%M%SZ").strftime(
+            "%Y-%m-%dT%H%M%SZ"
+        ) == match.group("stamp")
+    except ValueError:
+        return False
 
 
 def _validate_v2_portable_names(raw: Any, paths: tuple[tuple[str, str], ...]) -> Any:
@@ -266,6 +281,7 @@ class BackupPostgresSource(StrictModel):
 class BackupPathSource(StrictModel):
     type: Literal["file", "directory", "glob"]
     path: str
+    restore_destination: str
 
     @field_validator("path")
     @classmethod
@@ -275,11 +291,32 @@ class BackupPathSource(StrictModel):
             raise ValueError("backup paths must be normalized absolute POSIX paths")
         return value
 
+    @field_validator("restore_destination")
+    @classmethod
+    def safe_restore_destination(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or value != str(path)
+            or value in {"", "."}
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError(
+                "backup restore_destination must be a normalized relative POSIX path"
+            )
+        return value
+
 
 class BackupRetention(StrictModel):
     daily: int = Field(default=7, ge=0, le=366)
     weekly: int = Field(default=4, ge=0, le=260)
     monthly: int = Field(default=6, ge=0, le=120)
+
+    @model_validator(mode="after")
+    def keeps_at_least_one_backup(self) -> "BackupRetention":
+        if self.daily == self.weekly == self.monthly == 0:
+            raise ValueError("backup retention must keep at least one backup")
+        return self
 
 
 class BackupConfig(StrictModel):
@@ -304,6 +341,19 @@ class BackupConfig(StrictModel):
             raise ValueError("backup schedule must use HH:MM")
         return value
 
+    @model_validator(mode="after")
+    def non_overlapping_restore_destinations(self) -> "BackupConfig":
+        destinations = [
+            item.restore_destination
+            for item in self.include
+            if isinstance(item, BackupPathSource)
+        ]
+        for index, first in enumerate(destinations):
+            for second in destinations[index + 1 :]:
+                if _paths_overlap(first, second):
+                    raise ValueError("backup restore destinations must not overlap")
+        return self
+
 
 class EnvironmentConfig(StrictModel):
     _project_dir: Path | None = PrivateAttr(default=None)
@@ -313,6 +363,7 @@ class EnvironmentConfig(StrictModel):
 
     schema_version: Literal[1, 2]
     environment: Literal["stage", "prod", "restore"]
+    source_environment: Literal["prod"] | None = None
     server: ServerConfig
     application: ApplicationConfig
     domain: str
@@ -362,6 +413,10 @@ class EnvironmentConfig(StrictModel):
 
     @model_validator(mode="after")
     def secure_health_path(self) -> "EnvironmentConfig":
+        if self.environment == "restore" and self.source_environment != "prod":
+            raise ValueError("restore environment requires source_environment: prod")
+        if self.environment != "restore" and self.source_environment is not None:
+            raise ValueError("source_environment is only valid for restore environment")
         if self.backup is not None and self.schema_version != 2:
             raise ValueError("backup requires schema v2 external secret storage")
         if not self.health_path.startswith("/"):

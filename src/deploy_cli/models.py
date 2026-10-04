@@ -19,7 +19,7 @@ def _validate_v2_portable_names(raw: Any, paths: tuple[tuple[str, str], ...]) ->
     for section, field in paths:
         body = raw.get(section)
         value = body.get(field) if isinstance(body, dict) else None
-        if section == "collector" and body is None:
+        if section in {"collector", "backup"} and body is None:
             continue
         if value is None and section == "application" and field == "registry_auth_file":
             continue
@@ -255,6 +255,56 @@ class CollectorConfig(StrictModel):
     def safe_remote_dir(cls, value: str) -> str:
         return _managed_remote_dir(value, field="collector remote_dir")
 
+
+class BackupPostgresSource(StrictModel):
+    type: Literal["postgres"]
+    service: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    database: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
+    user: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
+
+
+class BackupPathSource(StrictModel):
+    type: Literal["file", "directory", "glob"]
+    path: str
+
+    @field_validator("path")
+    @classmethod
+    def safe_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if not path.is_absolute() or value != str(path) or ".." in path.parts:
+            raise ValueError("backup paths must be normalized absolute POSIX paths")
+        return value
+
+
+class BackupRetention(StrictModel):
+    daily: int = Field(default=7, ge=0, le=366)
+    weekly: int = Field(default=4, ge=0, le=260)
+    monthly: int = Field(default=6, ge=0, le=120)
+
+
+class BackupConfig(StrictModel):
+    enabled: bool = True
+    schedule: str = "03:15"
+    remote: str = Field(pattern=r"^[A-Za-z0-9_-]+:[A-Za-z0-9_./-]+$")
+    credentials_file: Path
+    age_identity_file: Path
+    age_recipient: str = Field(pattern=r"^age1[0-9a-z]{58}$")
+    include: list[BackupPostgresSource | BackupPathSource] = Field(min_length=1)
+    retention: BackupRetention = Field(default_factory=BackupRetention)
+
+    @field_validator("credentials_file", "age_identity_file", mode="before")
+    @classmethod
+    def expand_secret_path(cls, value: str) -> Path:
+        return Path(value).expanduser()
+
+    @field_validator("schedule")
+    @classmethod
+    def valid_schedule(cls, value: str) -> str:
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError("backup schedule must use HH:MM")
+        return value
+
+
 class EnvironmentConfig(StrictModel):
     _project_dir: Path | None = PrivateAttr(default=None)
     _external_secret_root: Path | None = PrivateAttr(default=None)
@@ -262,13 +312,14 @@ class EnvironmentConfig(StrictModel):
     _validate_external_trusted_base: bool = PrivateAttr(default=True)
 
     schema_version: Literal[1, 2]
-    environment: Literal["stage", "prod"]
+    environment: Literal["stage", "prod", "restore"]
     server: ServerConfig
     application: ApplicationConfig
     domain: str
     acme_email: str
     health_path: str = "/health"
     collector: CollectorConfig | None = None
+    backup: BackupConfig | None = None
 
     def set_external_secret_context(
         self, project_dir: Path, root: Path, trusted_base: Path, validate_trusted_base: bool
@@ -304,11 +355,15 @@ class EnvironmentConfig(StrictModel):
                 ("application", "env_file"),
                 ("application", "registry_auth_file"),
                 ("collector", "password_file"),
+                ("backup", "credentials_file"),
+                ("backup", "age_identity_file"),
             ),
         )
 
     @model_validator(mode="after")
     def secure_health_path(self) -> "EnvironmentConfig":
+        if self.backup is not None and self.schema_version != 2:
+            raise ValueError("backup requires schema v2 external secret storage")
         if not self.health_path.startswith("/"):
             raise ValueError("health_path must start with /")
         if self.collector is not None and _paths_overlap(

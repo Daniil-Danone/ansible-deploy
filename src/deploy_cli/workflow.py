@@ -532,3 +532,100 @@ def monitoring_status(config: MonitoringConfig, *, timeout: float = 10.0) -> Non
                 raise RunnerError(f"Grafana health returned HTTP {response.status}", 7)
     except (OSError, urllib.error.URLError) as exc:
         raise RunnerError(f"Grafana health check failed: {exc}", 7) from exc
+
+
+def _backup_variables(source: EnvironmentConfig, target: EnvironmentConfig) -> dict[str, object]:
+    backup = source.backup
+    if backup is None:
+        raise RunnerError("Production backup is not configured", 8)
+    return {
+        "app_environment": target.environment,
+        "backup_schedule": backup.schedule,
+        "backup_id": "",
+        "backup_runtime_config": {
+            "age_identity": "/run/ansible-deploy-age-identity",
+            "age_recipient": backup.age_recipient,
+            "compose_file": f"{target.application.remote_dir}/current/compose.yml",
+            "include": [item.model_dump(mode="json") for item in backup.include],
+            "rclone_config": "/etc/ansible-deploy/backup/rclone.conf",
+            "remote": backup.remote,
+            "result_file": "/var/lib/ansible-deploy/backup/last-result.json",
+            "retention": backup.retention.model_dump(),
+        },
+    }
+
+
+def backup_operation(
+    repo: Path,
+    global_config: GlobalConfig,
+    config: EnvironmentConfig,
+    runner: AnsibleRunner,
+    *,
+    action: str,
+) -> None:
+    runner.build_image()
+    runner.trust_host(
+        config.server.host, config.server.ssh_port, config.server.host_key_fingerprints
+    )
+    inventory = write_inventory(repo, config, bootstrap=False)
+    variables = ansible_vars(global_config, config)
+    variables.update(_backup_variables(config, config))
+    variables["backup_action"] = action
+    runner.playbook(
+        "guard_environment.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        exit_code=8,
+    )
+    runner.playbook(
+        "backup.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        backup_credentials_file=(
+            config.backup.credentials_file
+            if config.backup is not None and action == "setup"
+            else None
+        ),
+        exit_code=8,
+    )
+
+
+def restore_backup(
+    repo: Path,
+    global_config: GlobalConfig,
+    source: EnvironmentConfig,
+    target: EnvironmentConfig,
+    runner: AnsibleRunner,
+    *,
+    backup_id: str,
+) -> None:
+    if target.environment != "restore":
+        raise RunnerError("Backup restore target must be the dedicated restore environment", 8)
+    if source.backup is None:
+        raise RunnerError("Production backup is not configured", 8)
+    runner.build_image()
+    runner.trust_host(
+        target.server.host, target.server.ssh_port, target.server.host_key_fingerprints
+    )
+    inventory = write_inventory(repo, target, bootstrap=False)
+    variables = ansible_vars(global_config, target)
+    variables.update(_backup_variables(source, target))
+    variables.update({"backup_action": "restore", "backup_id": backup_id})
+    runner.playbook(
+        "guard_environment.yml",
+        inventory,
+        variables,
+        target.server.ssh_key,
+        exit_code=8,
+    )
+    runner.playbook(
+        "backup_restore.yml",
+        inventory,
+        variables,
+        target.server.ssh_key,
+        backup_credentials_file=source.backup.credentials_file,
+        age_identity_file=source.backup.age_identity_file,
+        exit_code=8,
+    )

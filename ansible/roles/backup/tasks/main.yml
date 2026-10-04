@@ -1,0 +1,150 @@
+---
+- name: Require a supported backup operation
+  ansible.builtin.assert:
+    that:
+      - backup_action in ['setup', 'run', 'list', 'restore']
+      - app_environment in ['prod', 'restore']
+    fail_msg: Backup operations are restricted to Production source and Restore target
+
+- name: Install backup runtime dependencies
+  ansible.builtin.apt:
+    name:
+      - age
+      - rclone
+    state: present
+    update_cache: true
+  when: backup_action in ['setup', 'restore']
+
+- name: Create protected backup directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /etc/ansible-deploy/backup
+    - /var/lib/ansible-deploy/backup
+
+- name: Install backup runtime
+  ansible.builtin.copy:
+    src: backup_runtime.py
+    dest: /usr/local/lib/ansible-deploy-backup.py
+    owner: root
+    group: root
+    mode: "0700"
+  when: backup_action in ['setup', 'restore']
+
+- name: Install protected rclone configuration
+  ansible.builtin.copy:
+    src: /run/secrets/backup_credentials
+    dest: /etc/ansible-deploy/backup/rclone.conf
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: backup_action in ['setup', 'restore']
+
+- name: Install non-secret backup configuration
+  ansible.builtin.copy:
+    dest: /etc/ansible-deploy/backup/config.json
+    owner: root
+    group: root
+    mode: "0600"
+    content: "{{ backup_runtime_config | to_nice_json }}\n"
+  when: backup_action in ['setup', 'restore']
+
+- name: Install scheduled backup service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ansible-deploy-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Create and verify encrypted Production backup
+      After=docker.service network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      User=root
+      UMask=0077
+      ExecStart=/usr/local/lib/ansible-deploy-backup.py run
+      StandardOutput=journal
+      StandardError=journal
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectHome=true
+  register: backup_service
+  when: backup_action == 'setup'
+
+- name: Install scheduled backup timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ansible-deploy-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Run Production backup daily
+      [Timer]
+      OnCalendar=*-*-* {{ backup_schedule }}:00 UTC
+      Persistent=true
+      RandomizedDelaySec=300
+      [Install]
+      WantedBy=timers.target
+  register: backup_timer
+  when: backup_action == 'setup'
+
+- name: Enable scheduled backup timer
+  ansible.builtin.systemd_service:
+    name: ansible-deploy-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: "{{ backup_service.changed or backup_timer.changed }}"
+  when: backup_action == 'setup'
+
+- name: Run requested backup operation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/lib/ansible-deploy-backup.py
+      - "{{ backup_action }}"
+  register: backup_result
+  changed_when: backup_action == 'run'
+  when: backup_action in ['run', 'list']
+
+- name: Show safe backup result
+  ansible.builtin.debug:
+    var: backup_result.stdout
+  when: backup_action in ['run', 'list']
+
+- name: Restore encrypted backup with ephemeral identity
+  when: backup_action == 'restore'
+  block:
+    - name: Stage age identity in tmpfs
+      ansible.builtin.copy:
+        src: /run/secrets/age_identity
+        dest: /run/ansible-deploy-age-identity
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Restore selected backup
+      ansible.builtin.command:
+        argv:
+          - /usr/local/lib/ansible-deploy-backup.py
+          - restore
+          - --backup
+          - "{{ backup_id }}"
+      register: backup_restore_result
+      changed_when: true
+
+    - name: Show safe restore result
+      ansible.builtin.debug:
+        var: backup_restore_result.stdout
+  always:
+    - name: Remove ephemeral age identity
+      ansible.builtin.file:
+        path: /run/ansible-deploy-age-identity
+        state: absent

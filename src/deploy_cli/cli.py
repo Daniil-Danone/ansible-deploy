@@ -10,12 +10,14 @@ from .config import (
     ConfigurationError,
     load_configuration,
     read_external_secret_text,
+    validate_backup_inputs,
     validate_compose,
     validate_environment_file,
     validate_local_inputs,
     validate_observability_inputs,
     validate_production_isolation,
     validate_registry_auth,
+    validate_restore_isolation,
 )
 from .images import publish_images
 from .keys import ensure_deploy_key
@@ -25,12 +27,14 @@ from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
 from .secret_store import SecretStoreError, create_project_id, external_secret_root
 from .workflow import (
+    backup_operation,
     collector_status,
     deploy,
     deploy_collector,
     deploy_monitoring,
     dns_preflight,
     monitoring_status,
+    restore_backup,
     rollback,
     status,
     update_monitoring,
@@ -113,6 +117,16 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="create or replace .deploy/project-id without copying secrets",
     )
+    backup = sub.add_parser("backup", help="Manage encrypted Production backups")
+    backup_sub = backup.add_subparsers(dest="backup_command", required=True)
+    for action in ("setup", "run", "list"):
+        operation = backup_sub.add_parser(action)
+        operation.add_argument("environment", choices=["prod"])
+    restore = backup_sub.add_parser("restore")
+    restore.add_argument("environment", choices=["prod"])
+    restore.add_argument("--target", required=True)
+    restore.add_argument("--backup", required=True, dest="backup_id")
+    restore.add_argument("--yes", action="store_true")
     return parser
 
 
@@ -253,6 +267,86 @@ def run(argv: list[str] | None = None) -> int:
                 print(f"[IMAGE] {image.service}: {image.immutable_reference}")
             print(f"[OK] Published {len(published)} images and updated {args.environment} Compose")
             return 0
+        if args.command == "backup":
+            try:
+                if args.backup_command == "restore" and args.target != "restore":
+                    raise ConfigurationError(
+                        "Restore target must be the dedicated restore environment"
+                    )
+                global_config, source = load_configuration(project_dir, "prod")
+                if not isinstance(source, EnvironmentConfig):
+                    raise ConfigurationError("Production environment configuration is required")
+                validate_backup_inputs(source, require_identity=args.backup_command == "restore")
+                backup_config = source.backup
+                if backup_config is None:
+                    raise ConfigurationError("Production backup is not configured")
+                if args.backup_command == "restore":
+                    _, target = load_configuration(project_dir, args.target)
+                    if not isinstance(target, EnvironmentConfig) or target.environment != "restore":
+                        raise ConfigurationError(
+                            "Restore target must be a dedicated restore environment"
+                        )
+                    validate_restore_isolation(source, target)
+                    validate_local_inputs(
+                        target, require_public_key=False, require_application=False
+                    )
+                    if not args.yes:
+                        if not sys.stdin.isatty():
+                            raise ConfigurationError(
+                                "Restore requires an interactive terminal or --yes"
+                            )
+                        print(f"Restore target: host={target.server.host}, backup={args.backup_id}")
+                        if input("Type 'restore' to continue: ").strip() != "restore":
+                            raise ConfigurationError("Restore was not confirmed")
+                    active = target
+                else:
+                    validate_local_inputs(
+                        source, require_public_key=False, require_application=False
+                    )
+                    active = source
+                external_context = active.external_secret_context
+                runner = AnsibleRunner(
+                    project_dir,
+                    Redactor(
+                        {
+                            str(backup_config.credentials_file),
+                            str(backup_config.age_identity_file),
+                            str(active.server.ssh_key),
+                        }
+                    ),
+                    environment=active.environment,
+                    verbose=args.verbose,
+                    external_secret_root=(
+                        external_context[1] if external_context is not None else None
+                    ),
+                    external_trusted_base=(
+                        external_context[2] if external_context is not None else None
+                    ),
+                    validate_external_trusted_base=(
+                        external_context[3] if external_context is not None else True
+                    ),
+                )
+                if args.backup_command == "restore":
+                    restore_backup(
+                        project_dir,
+                        global_config,
+                        source,
+                        active,
+                        runner,
+                        backup_id=args.backup_id,
+                    )
+                else:
+                    backup_operation(
+                        project_dir,
+                        global_config,
+                        source,
+                        runner,
+                        action=args.backup_command,
+                    )
+                print(f"[OK] backup {args.backup_command} completed")
+                return 0
+            except (ConfigurationError, SecretStoreError) as exc:
+                raise RunnerError(str(exc), 8) from exc
         if (
             (args.command in {"stage", "prod"} or args.command == "monitoring")
             and args.ask_bootstrap_password

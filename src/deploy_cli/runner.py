@@ -177,6 +177,8 @@ class AnsibleRunner:
         env_file: Path | None = None,
         registry_auth_file: Path | None = None,
         observability_secret_file: Path | None = None,
+        backup_credentials_file: Path | None = None,
+        age_identity_file: Path | None = None,
         check: bool = False,
         exit_code: int = 5,
         bootstrap_password: str | None = None,
@@ -188,6 +190,8 @@ class AnsibleRunner:
                 ("application environment", env_file, True),
                 ("registry authentication", registry_auth_file, True),
                 ("observability secret", observability_secret_file, True),
+                ("backup credentials", backup_credentials_file, True),
+                ("age identity", age_identity_file, True),
             ]
             self._pending_external_mounts = [
                 (field, path, secret)
@@ -238,6 +242,16 @@ class AnsibleRunner:
             args[3:3] = [
                 "-v",
                 f"{observability_secret_file}:/run/secrets/observability:ro",
+            ]
+        if backup_credentials_file is not None:
+            args[3:3] = [
+                "-v",
+                f"{backup_credentials_file}:/run/secrets/backup_credentials:ro",
+            ]
+        if age_identity_file is not None:
+            args[3:3] = [
+                "-v",
+                f"{age_identity_file}:/run/secrets/age_identity:ro",
             ]
         if check:
             args.extend(["--check", "--diff"])

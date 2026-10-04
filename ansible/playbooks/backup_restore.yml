@@ -1,0 +1,7 @@
+---
+- name: Restore Production backup into isolated Restore environment
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - role: backup

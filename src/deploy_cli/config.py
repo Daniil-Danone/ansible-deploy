@@ -87,7 +87,7 @@ def _external_file_path(
 ) -> Path:
     try:
         return resolve_external_file(project_dir, configured, secret=secret)
-    except SecretStoreError:
+    except (SecretStoreError, OSError, ValueError):
         raise ConfigurationError(f"Invalid schema v2 {field}") from None
 
 
@@ -132,7 +132,7 @@ def validate_external_input_for_use(
             trusted_base=trusted_base,
             validate_trusted_base=validate_trusted_base,
         )
-    except SecretStoreError:
+    except (SecretStoreError, OSError, ValueError):
         # Configured names and absolute external paths are sensitive metadata too.
         raise ConfigurationError(
             f"Required {field} is unavailable for {config.environment}"
@@ -350,15 +350,19 @@ def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) 
     )
     if secret is None:
         raise ConfigurationError(f"{config.environment} collector is not configured")
-    validate_external_input_for_use(config, secret, field="observability secret")
-    if not secret.is_file():
-        raise ConfigurationError(
-            f"Required observability secret is unavailable for {config.environment}"
-        )
     try:
+        validate_external_input_for_use(config, secret, field="observability secret")
+        if not secret.is_file():
+            raise ConfigurationError(
+                f"Required observability secret is unavailable for {config.environment}"
+            )
         validate_secret_permissions(secret)
-    except (OSError, SecretFileError) as exc:
-        raise ConfigurationError("Observability secret permissions are not restrictive") from exc
+    except ConfigurationError:
+        raise
+    except (SecretStoreError, OSError, SecretFileError, ValueError):
+        raise ConfigurationError(
+            f"Unable to validate observability secret for {config.environment}"
+        ) from None
     try:
         if isinstance(config, MonitoringConfig):
             values = dotenv_values(
@@ -390,8 +394,10 @@ def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) 
                 raise ConfigurationError("Collector password file must contain one non-empty line")
     except ConfigurationError:
         raise
-    except (OSError, UnicodeError, ValueError):
-        raise ConfigurationError("Observability secret file is invalid") from None
+    except (SecretStoreError, OSError, UnicodeError, ValueError):
+        raise ConfigurationError(
+            f"Observability secret is invalid for {config.environment}"
+        ) from None
 
 
 def validate_local_inputs(
@@ -519,8 +525,10 @@ def validate_registry_auth(
         )
     except ConfigurationError:
         raise
-    except json.JSONDecodeError:
-        raise ConfigurationError("Registry authentication file is not valid JSON") from None
+    except (SecretStoreError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        raise ConfigurationError(
+            f"Registry authentication is invalid for {config.environment}"
+        ) from None
     if not isinstance(document, dict) or not isinstance(document.get("auths"), dict):
         raise ConfigurationError("Registry authentication file must contain an auths mapping")
     if "credsStore" in document or "credHelpers" in document:
@@ -541,10 +549,10 @@ def validate_registry_auth(
             )
         try:
             decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
-        except (binascii.Error, UnicodeError) as exc:
+        except (binascii.Error, UnicodeError):
             raise ConfigurationError(
                 "Registry authentication contains invalid inline credentials"
-            ) from exc
+            ) from None
         username, separator, token = decoded.partition(":")
         if not separator or not username or not token:
             raise ConfigurationError(
@@ -558,10 +566,10 @@ def validate_registry_auth(
             config.application.compose.read_text(encoding="utf-8")
         )
         services = compose["services"]
-    except (OSError, UnicodeError, yaml.YAMLError, KeyError, TypeError) as exc:
+    except (OSError, UnicodeError, yaml.YAMLError, KeyError, TypeError, ValueError):
         raise ConfigurationError(
             "Unable to match registry authentication to Compose images"
-        ) from exc
+        ) from None
     compose_hosts: set[str] = set()
     for service in services.values():
         if not isinstance(service, dict) or not isinstance(service.get("image"), str):
@@ -580,10 +588,10 @@ def validate_registry_auth(
         )
     try:
         validate_secret_permissions(path)
-    except (OSError, SecretFileError) as exc:
+    except (SecretStoreError, OSError, SecretFileError, ValueError):
         raise ConfigurationError(
-            "Registry authentication permissions are not restrictive"
-        ) from exc
+            f"Registry authentication permissions are invalid for {config.environment}"
+        ) from None
 
 
 def validate_production_isolation(repo: Path, prod: EnvironmentConfig) -> None:

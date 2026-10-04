@@ -20,6 +20,8 @@ from deploy_cli.config import (
     load_configuration,
     validate_environment_file,
     validate_local_inputs,
+    validate_observability_inputs,
+    validate_registry_auth,
 )
 from deploy_cli.keys import ensure_deploy_key
 from deploy_cli.redaction import Redactor
@@ -496,8 +498,114 @@ def test_sensitive_read_failure_is_generic_across_validator_workflow_and_cli(
     assert str(config.application.env_file) not in stderr
 
 
+@pytest.mark.parametrize(
+    "error_type", [secret_store.SecretStoreError, OSError, ValueError]
+)
+def test_shared_external_use_boundary_redacts_operational_failures_for_all_callers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[Exception],
+) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+    _, config = load_configuration(project, "stage")
+    marker = f"DO-NOT-DISCLOSE-shared-use-{error_type.__name__}"
+    sensitive_path = str(config.application.env_file)
+    monkeypatch.setattr(
+        config_module,
+        "validate_external_file_for_use",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error_type(marker)),
+    )
+    operations = (
+        lambda: config_module.validate_external_input_for_use(
+            config,
+            config.application.env_file,
+            field="application environment",
+        ),
+        lambda: config_module.read_external_secret_bytes(
+            config,
+            config.application.env_file,
+            field="application environment",
+        ),
+        lambda: config_module.read_external_secret_text(
+            config,
+            config.application.env_file,
+            field="application environment",
+        ),
+        lambda: validate_local_inputs(
+            config,
+            require_ssh=False,
+            require_public_key=False,
+        ),
+        lambda: validate_environment_file(config),
+        lambda: deployment_manifest(config),
+    )
+
+    for operation in operations:
+        with pytest.raises(ConfigurationError) as raised:
+            operation()
+        rendered = "".join(traceback.format_exception(raised.value))
+        assert marker not in rendered
+        assert sensitive_path not in rendered
+        assert "application environment" in str(raised.value)
+        assert config.environment in str(raised.value)
+        assert raised.value.__cause__ is None
+        assert raised.value.__suppress_context__
+
+    assert run(["--repo", str(project), "stage", "--dry-run", "--version", "abcdef0"]) == 2
+    stderr = capsys.readouterr().err
+    assert marker not in stderr
+    assert sensitive_path not in stderr
+    assert "application environment" in stderr
+    assert config.environment in stderr
+
+
+@pytest.mark.parametrize(
+    "error_type", [secret_store.SecretStoreError, OSError, ValueError]
+)
+def test_runner_external_mount_boundary_redacts_operational_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    project, root = _v2_project(tmp_path, monkeypatch)
+    marker = f"DO-NOT-DISCLOSE-runner-mount-{error_type.__name__}"
+    sensitive_path = root / "sensitive mount name"
+    runner = AnsibleRunner(
+        project,
+        Redactor([]),
+        environment="stage",
+        external_secret_root=root,
+    )
+    runner._pending_external_mounts = [
+        ("application environment", sensitive_path, True)
+    ]
+    monkeypatch.setattr(
+        runner_module,
+        "validate_external_file_for_use",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error_type(marker)),
+    )
+
+    with pytest.raises(RunnerError) as raised:
+        runner._validate_external_mounts(7)
+
+    rendered = "".join(traceback.format_exception(raised.value))
+    assert raised.value.exit_code == 7
+    assert marker not in rendered
+    assert str(sensitive_path) not in rendered
+    assert "application environment" in str(raised.value)
+    assert "stage" in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "error_type", [secret_store.SecretStoreError, OSError, ValueError]
+)
 def test_config_external_path_error_suppresses_sensitive_low_level_chain(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
 ) -> None:
     project, _ = _v2_project(tmp_path, monkeypatch)
     marker = "DO-NOT-DISCLOSE-configured-path"
@@ -505,7 +613,7 @@ def test_config_external_path_error_suppresses_sensitive_low_level_chain(
         config_module,
         "resolve_external_file",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            secret_store.SecretStoreError(marker)
+            error_type(marker)
         ),
     )
 
@@ -515,6 +623,72 @@ def test_config_external_path_error_suppresses_sensitive_low_level_chain(
     assert marker not in "".join(traceback.format_exception(raised.value))
     assert raised.value.__cause__ is None
     assert raised.value.__suppress_context__
+
+
+def test_observability_validation_suppresses_operational_exception_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+    _, config = load_configuration(project, "monitoring")
+    marker = "DO-NOT-DISCLOSE-monitoring-value"
+    sensitive_path = str(config.monitoring.secrets_file)
+    monkeypatch.setattr(
+        config_module,
+        "validate_external_input_for_use",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(marker)),
+    )
+
+    with pytest.raises(ConfigurationError) as raised:
+        validate_observability_inputs(config)
+
+    rendered = "".join(traceback.format_exception(raised.value))
+    assert marker not in rendered
+    assert sensitive_path not in rendered
+    assert config.environment in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+@pytest.mark.parametrize("failure_point", ["read", "permissions"])
+def test_registry_validation_suppresses_operational_exception_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+    _, config = load_configuration(project, "stage")
+    marker = f"DO-NOT-DISCLOSE-registry-{failure_point}"
+    sensitive_path = str(config.application.registry_auth_file)
+    encoded = "dXNlcjp0b2tlbg=="
+    if failure_point == "read":
+        monkeypatch.setattr(
+            config_module,
+            "read_external_secret_text",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError(marker)),
+        )
+    else:
+        monkeypatch.setattr(
+            config_module,
+            "read_external_secret_text",
+            lambda *args, **kwargs: (
+                '{"auths":{"ghcr.io":{"auth":"' + encoded + '"}}}'
+            ),
+        )
+        monkeypatch.setattr(
+            config_module,
+            "validate_secret_permissions",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                secret_store.SecretStoreError(marker)
+            ),
+        )
+
+    with pytest.raises(ConfigurationError) as raised:
+        validate_registry_auth(config)
+
+    rendered = "".join(traceback.format_exception(raised.value))
+    assert marker not in rendered
+    assert sensitive_path not in rendered
+    assert config.environment in str(raised.value)
+    assert raised.value.__cause__ is None
 
 
 def test_low_level_secret_store_operational_error_suppresses_sensitive_chain(

@@ -2,16 +2,16 @@
 
 - [x] 1. Контракт project identity и внешнего secret root
       Готово: T1–T4 зелёные; `deploy secrets path` печатает только внешний путь
-- [~] 2. Schema v2 и external writers: безопасный контракт без промежуточно сломанных команд
+- [x] 2. Schema v2 и external writers: безопасный контракт без промежуточно сломанных команд
       Готово: T5–T9 и T14–T16 зелёные; default demo, key/registry writers и runner работают только с external secret root
-- [ ] 3. Создание и аудит secret store
+- [~] 3. Создание и аудит secret store
       Готово: T10–T13 зелёные; `deploy secrets init` повторяем; `deploy secrets audit` обнаруживает permissions и worktree leaks
 - [S] 4. Key generation и registry auth используют внешний store — объединён с шагом 2 по решению владельца 2026-10-05
       Готово: T14–T16 закрываются атомарно в шаге 2
 - [ ] 5. Fail-closed миграция legacy project-local secrets
       Готово: T17–T21 зелёные; collision/partial failure не меняют источник и config
-- [ ] 6. Onboarding, CI contract и читаемая документация
-      Готово: T22–T24 зелёные; clean-copy walkthrough не создаёт secrets в Git worktree
+- [ ] 6. Onboarding и единый deployment runbook
+      Готово: T22–T24 зелёные; clean-copy walkthrough не создаёт secrets в Git worktree; runbook объясняет Stage, Prod, Monitoring и Collectors, порядок команд и диагностику
 - [ ] 7. Независимая security-проверка итерации
       Готово: полный набор из `flow/PROJECT.md` зелёный; reviewer не оставил blocker/major; `python .codex/tools/verify.py` не нашёл утечек
 - [ ] 8. `/ship`: PR external secret storage

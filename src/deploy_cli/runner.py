@@ -215,7 +215,7 @@ class AnsibleRunner:
                     trusted_base=self.external_trusted_base,
                     validate_trusted_base=self.validate_external_trusted_base,
                 )
-            except SecretStoreError:
+            except (SecretStoreError, OSError, ValueError):
                 raise RunnerError(
                     f"Required {field} is unavailable for {self.environment}", exit_code
                 ) from None

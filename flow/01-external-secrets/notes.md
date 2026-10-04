@@ -30,3 +30,14 @@ key lock меняет ACL до фактического lock и редко па�
 создании. Зелёный полный pytest не заменяет targeted fault/concurrency tests.
 По правилу двух review-кругов дальнейшая стабилизация требует явного
 подтверждения владельца.
+
+**Решение.** Владелец 2026-10-05 разрешил дополнительный stabilization-pass:
+исправить public rollback reporting, полную exception-chain redaction и
+Windows lock race, расширить fault/concurrency regressions и выполнить свежее
+независимое ревью перед закрытием шага.
+
+**Решение.** Документация должна содержать единый deployment runbook с картой
+ролей Stage/Prod/Monitoring/Collectors, матрицей команд, порядком первого
+bootstrap и обычных операций, проверками и диагностикой. Runbook оформляется
+отдельным PR после external secret storage, чтобы сразу описывать финальный
+secret layout, а не временный `.deploy` layout.

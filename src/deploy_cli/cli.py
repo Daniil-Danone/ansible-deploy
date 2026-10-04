@@ -21,6 +21,7 @@ from .keys import ensure_deploy_key
 from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
+from .secret_store import SecretStoreError, create_project_id, external_secret_root
 from .workflow import (
     collector_status,
     deploy,
@@ -95,6 +96,14 @@ def _parser() -> argparse.ArgumentParser:
         help="prompt for a separate read-only token used by the server",
     )
     publish.add_argument("--tag", help="image tag (defaults to application Git SHA)")
+    secrets = sub.add_parser("secrets", help="Manage external project secrets")
+    secrets_sub = secrets.add_subparsers(dest="secrets_command", required=True)
+    secrets_path = secrets_sub.add_parser("path", help="Print this project's external secret root")
+    secrets_path.add_argument(
+        "--new-project-id",
+        action="store_true",
+        help="create or replace .deploy/project-id without copying secrets",
+    )
     return parser
 
 
@@ -193,6 +202,11 @@ def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     project_dir = args.project_dir.resolve()
     try:
+        if args.command == "secrets":
+            if args.new_project_id:
+                create_project_id(project_dir)
+            print(external_secret_root(project_dir))
+            return 0
         if args.command == "images":
             published = publish_images(
                 project_dir,
@@ -378,7 +392,7 @@ def run(argv: list[str] | None = None) -> int:
                 update_failures[0][1].exit_code,
             )
         return 0
-    except ConfigurationError as exc:
+    except (ConfigurationError, SecretStoreError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
     except RunnerError as exc:

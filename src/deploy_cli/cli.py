@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import (
     ConfigurationError,
     load_configuration,
+    read_external_secret_text,
     validate_compose,
     validate_environment_file,
     validate_local_inputs,
@@ -21,6 +22,7 @@ from .keys import ensure_deploy_key
 from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
+from .secret_store import SecretStoreError, create_project_id, external_secret_root
 from .workflow import (
     collector_status,
     deploy,
@@ -95,6 +97,14 @@ def _parser() -> argparse.ArgumentParser:
         help="prompt for a separate read-only token used by the server",
     )
     publish.add_argument("--tag", help="image tag (defaults to application Git SHA)")
+    secrets = sub.add_parser("secrets", help="Manage external project secrets")
+    secrets_sub = secrets.add_subparsers(dest="secrets_command", required=True)
+    secrets_path = secrets_sub.add_parser("path", help="Print this project's external secret root")
+    secrets_path.add_argument(
+        "--new-project-id",
+        action="store_true",
+        help="create or replace .deploy/project-id without copying secrets",
+    )
     return parser
 
 
@@ -193,6 +203,11 @@ def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     project_dir = args.project_dir.resolve()
     try:
+        if args.command == "secrets":
+            if args.new_project_id:
+                create_project_id(project_dir)
+            print(external_secret_root(project_dir))
+            return 0
         if args.command == "images":
             published = publish_images(
                 project_dir,
@@ -279,13 +294,33 @@ def run(argv: list[str] | None = None) -> int:
         for current_environment, (global_config, config) in zip(environments, loaded, strict=True):
             secret_values: set[str] = set()
             if isinstance(config, EnvironmentConfig) and config.application.env_file.is_file():
-                env_text = config.application.env_file.read_text(encoding="utf-8")
+                if config.schema_version == 2:
+                    env_text = read_external_secret_text(
+                        config,
+                        config.application.env_file,
+                        field="application environment",
+                    )
+                else:
+                    env_text = config.application.env_file.read_text(encoding="utf-8")
                 secret_values = secrets_from_env(env_text)
             if bootstrap_password is not None:
                 secret_values.add(bootstrap_password)
             redactor = Redactor(secret_values | {str(config.server.ssh_key)})
+            external_context = config.external_secret_context
             runner = AnsibleRunner(
-                project_dir, redactor, environment=current_environment, verbose=args.verbose
+                project_dir,
+                redactor,
+                environment=current_environment,
+                verbose=args.verbose,
+                external_secret_root=(
+                    external_context[1] if external_context is not None else None
+                ),
+                external_trusted_base=(
+                    external_context[2] if external_context is not None else None
+                ),
+                validate_external_trusted_base=(
+                    external_context[3] if external_context is not None else True
+                ),
             )
             if args.command == "status":
                 if not isinstance(config, EnvironmentConfig):
@@ -378,7 +413,7 @@ def run(argv: list[str] | None = None) -> int:
                 update_failures[0][1].exit_code,
             )
         return 0
-    except ConfigurationError as exc:
+    except (ConfigurationError, SecretStoreError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
     except RunnerError as exc:

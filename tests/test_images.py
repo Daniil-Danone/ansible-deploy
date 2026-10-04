@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import threading
 import time
+import traceback
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,18 @@ from deploy_cli.secret_file import secure_secret_permissions
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
+
+
+@pytest.fixture(autouse=True)
+def _external_secret_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted_base = tmp_path / "trusted external base"
+    trusted_base.mkdir()
+    secure_secret_permissions(trusted_base)
+    monkeypatch.setenv(
+        "ANSIBLE_DEPLOY_SECRETS_DIR", str(trusted_base / "project secrets")
+    )
 
 
 def _demo(tmp_path: Path) -> Path:
@@ -35,10 +48,23 @@ def _demo(tmp_path: Path) -> Path:
 def _configure_registry_auth(project: Path, environment: str = "stage") -> Path:
     config_path = project / f".deploy/environments/{environment}/config.yml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    relative = f".deploy/environments/{environment}/registry-auth.json"
+    relative = f"environments/{environment}/registry-auth.json"
     config["application"]["registry_auth_file"] = relative
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-    return project / relative
+    _, deployment = images.load_configuration(project, environment)
+    path = deployment.application.registry_auth_file
+    assert path is not None
+    context = deployment.external_secret_context
+    assert context is not None
+    context_project, root, trusted_base, validate_base = context
+    images.ensure_external_parent_for_write(
+        context_project,
+        root,
+        path,
+        trusted_base=trusted_base,
+        validate_trusted_base=validate_base,
+    )
+    return path
 
 
 def _write_portable_auth(path: Path, username: str, credential: str) -> bytes:
@@ -106,6 +132,24 @@ def test_images_publish_command_parsing(tmp_path: Path, monkeypatch: pytest.Monk
 )
 def test_registry_repository_names(registry: str, expected: str) -> None:
     assert images.registry_repository(registry, "Acme", "demo-backend") == expected
+
+
+def test_docker_operational_error_suppresses_sensitive_exception_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "DO-NOT-DISCLOSE-external-secret-path"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(marker)),
+    )
+
+    with pytest.raises(RunnerError) as raised:
+        images._docker(["version"], tmp_path, images.Redactor([]))
+
+    assert marker not in "".join(traceback.format_exception(raised.value))
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
 
 
 @pytest.mark.parametrize(
@@ -205,7 +249,7 @@ def test_existing_docker_login_needs_no_token(
     assert not any(command[0] == "login" for command in commands)
 
 
-def test_publish_writes_portable_server_auth_atomically(
+def test_t15_default_demo_v2_publish_writes_external_auth_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = _demo(tmp_path)
@@ -256,6 +300,7 @@ def test_invalid_existing_server_auth_is_preserved_without_docker_actions(
     auth_path = _configure_registry_auth(project)
     original = b'{"auths":{"ghcr.io":{"auth":"preserve-me"}}}\n'
     auth_path.write_bytes(original)
+    secure_secret_permissions(auth_path)
     called = False
 
     def docker(*args, **kwargs):
@@ -329,7 +374,7 @@ def test_publish_token_cannot_be_reused_as_server_pull_token(tmp_path: Path) -> 
         )
 
 
-def test_compose_commit_failure_rolls_back_registry_auth(
+def test_t15_compose_failure_rolls_back_new_external_registry_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = _demo(tmp_path)
@@ -372,7 +417,7 @@ def test_compose_commit_failure_rolls_back_registry_auth(
     assert list(auth_path.parent.glob(".registry-auth.json.candidate.*")) == []
 
 
-def test_existing_valid_auth_is_preserved_byte_for_byte(
+def test_t15_compose_failure_preserves_existing_external_auth_byte_for_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = _demo(tmp_path)
@@ -388,16 +433,24 @@ def test_existing_valid_auth_is_preserved_byte_for_byte(
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
     monkeypatch.setattr(images, "_docker", docker)
-    images.publish_images(
-        project,
-        "stage",
-        registry="ghcr",
-        namespace="acme",
-        username=None,
-        ask_token=False,
-        tag="abcdef0",
-        environ={},
+    monkeypatch.setattr(
+        images,
+        "_atomic_compose_update",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConfigurationError("synthetic Compose failure")
+        ),
     )
+    with pytest.raises(ConfigurationError, match="synthetic Compose"):
+        images.publish_images(
+            project,
+            "stage",
+            registry="ghcr",
+            namespace="acme",
+            username=None,
+            ask_token=False,
+            tag="abcdef0",
+            environ={},
+        )
 
     assert auth_path.read_bytes() == original
 
@@ -461,34 +514,60 @@ def test_registry_auth_creation_race_never_overwrites_winner(
     assert path.read_bytes() == winner
 
 
-def test_unignored_registry_auth_target_is_rejected(
+def test_registry_auth_rollback_unlink_failure_is_reported_and_file_remains(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "registry-auth.json"
+    content = images._portable_registry_auth("reader", "credential", "ghcr.io")
+    original_unlink = Path.unlink
+
+    def failing_unlink(target: Path, *args, **kwargs):
+        if target == path:
+            raise OSError("DO-NOT-DISCLOSE-unlink-path")
+        return original_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    with pytest.raises(ConfigurationError, match="rollback failed") as raised:
+        with images._new_registry_auth_transaction(path, content):
+            raise ConfigurationError("synthetic transaction failure")
+
+    assert raised.value.__cause__ is None
+    assert "DO-NOT-DISCLOSE" not in "".join(traceback.format_exception(raised.value))
+    assert path.read_bytes() == content
+
+
+def test_registry_auth_create_suppresses_sensitive_operational_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "DO-NOT-DISCLOSE-registry-auth-path"
+    monkeypatch.setattr(
+        images,
+        "_durable_temporary",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(marker)),
+    )
+
+    with pytest.raises(ConfigurationError) as raised:
+        images._create_registry_auth(tmp_path / "registry-auth.json", b"secret")
+
+    assert raised.value.__cause__ is None
+    assert marker not in "".join(traceback.format_exception(raised.value))
+
+
+def test_external_registry_auth_target_is_independent_from_worktree_gitignore(
+    tmp_path: Path,
 ) -> None:
     project = _demo(tmp_path)
     auth_path = _configure_registry_auth(project)
     (project / ".gitignore").write_text(".deploy-state/\n", encoding="utf-8")
-    git = shutil.which("git")
-    assert git is not None
-    subprocess.run(  # noqa: S603, S607 - fixed test Git command
-        [git, "init"], cwd=project, check=True, capture_output=True
-    )
-    monkeypatch.setattr(images, "_docker", lambda *args, **kwargs: None)
+    _, deployment = images.load_configuration(project, "stage")
 
-    with pytest.raises(ConfigurationError, match="ignored by Git"):
-        images.publish_images(
-            project,
-            "stage",
-            registry="ghcr",
-            namespace="acme",
-            username=None,
-            ask_token=False,
-            tag="abcdef0",
-            environ={"GHCR_PULL_USERNAME": "reader", "GHCR_PULL_TOKEN": "pull"},
-        )
+    images._assert_registry_auth_target(project, deployment, auth_path)
+
+    assert not auth_path.is_relative_to(project)
     assert not auth_path.exists()
 
 
-def test_tracked_registry_auth_is_rejected_without_modification(tmp_path: Path) -> None:
+def test_external_registry_auth_cannot_be_added_to_project_index(tmp_path: Path) -> None:
     project = _demo(tmp_path)
     auth_path = _configure_registry_auth(project)
     original = _write_portable_auth(auth_path, "reader", "existing")
@@ -497,24 +576,14 @@ def test_tracked_registry_auth_is_rejected_without_modification(tmp_path: Path) 
     subprocess.run(  # noqa: S603, S607 - fixed test Git command
         [git, "init"], cwd=project, check=True, capture_output=True
     )
-    subprocess.run(  # noqa: S603, S607 - fixed test Git command
-        [git, "add", "-f", ".deploy/environments/stage/registry-auth.json"],
+    tracked = subprocess.run(  # noqa: S603, S607 - fixed test Git command
+        [git, "ls-files", "--error-unmatch", "--", str(auth_path)],
         cwd=project,
-        check=True,
+        check=False,
         capture_output=True,
     )
 
-    with pytest.raises(ConfigurationError, match="must not be tracked"):
-        images.publish_images(
-            project,
-            "stage",
-            registry="ghcr",
-            namespace="acme",
-            username=None,
-            ask_token=False,
-            tag="abcdef0",
-            environ={},
-        )
+    assert tracked.returncode != 0
     assert auth_path.read_bytes() == original
 
 
@@ -528,7 +597,7 @@ def test_registry_auth_symlink_is_rejected(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("Symbolic links are unavailable")
 
-    with pytest.raises(ConfigurationError, match="symbolic links or junctions"):
+    with pytest.raises(ConfigurationError, match="Invalid schema v2"):
         images.publish_images(
             project,
             "stage",
@@ -545,7 +614,7 @@ def test_shared_auth_lock_preserves_success_after_parallel_failed_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = _demo(tmp_path)
-    shared = ".deploy/environments/shared-registry-auth.json"
+    shared = "environments/shared-registry-auth.json"
     for environment in ("stage", "prod"):
         config_path = project / f".deploy/environments/{environment}/config.yml"
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -605,7 +674,9 @@ def test_shared_auth_lock_preserves_success_after_parallel_failed_publish(
     stage_thread.join(timeout=15)
     prod_thread.join(timeout=15)
 
-    auth_path = project / shared
+    _, deployment = images.load_configuration(project, "prod")
+    auth_path = deployment.application.registry_auth_file
+    assert auth_path is not None
     assert len(failures) == 1
     assert "stage commit failed" in str(failures[0])
     assert stage_compose.read_bytes() == stage_original
@@ -622,8 +693,11 @@ def test_ask_token_uses_secure_prompt_and_redacts_login_failure(
     monkeypatch.setattr(images.getpass, "getpass", lambda prompt: token)
 
     calls: list[tuple[list[str], str | None]] = []
+    real_run = subprocess.run
 
     def run(arguments, **kwargs):
+        if "input" not in kwargs:
+            return real_run(arguments, **kwargs)
         calls.append((arguments, kwargs["input"]))
         return subprocess.CompletedProcess(arguments, 1, "", f"login rejected {token}")
 
@@ -642,7 +716,7 @@ def test_ask_token_uses_secure_prompt_and_redacts_login_failure(
         )
 
     assert token not in str(raised.value)
-    assert "[REDACTED]" in str(raised.value)
+    assert "suppressed" in str(raised.value)
     assert calls[0][1] == token + "\n"
     assert token not in calls[0][0]
 
@@ -943,7 +1017,7 @@ def test_docker_errors_redact_registry_token(
         images._docker(arguments, tmp_path, images.Redactor([token]))
 
     assert token not in str(raised.value)
-    assert "[REDACTED]" in str(raised.value)
+    assert "suppressed" in str(raised.value) or "safely" in str(raised.value)
 
 
 def test_external_compose_edit_fails_cas_without_overwrite(

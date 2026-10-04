@@ -21,13 +21,20 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import AliasToken, AnchorToken, ScalarToken
 
-from .config import ConfigurationError, load_configuration, validate_registry_auth
+from .config import (
+    ConfigurationError,
+    load_configuration,
+    read_external_secret_bytes,
+    validate_registry_auth,
+)
+from .models import EnvironmentConfig
 from .redaction import Redactor
 from .runner import RunnerError
 from .secret_file import (
     SecretFileError,
     secure_secret_permissions,
 )
+from .secret_store import SecretStoreError, ensure_external_parent_for_write
 
 if sys.platform == "win32":
     import msvcrt
@@ -275,11 +282,10 @@ def _docker(
             errors="replace",
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RunnerError(f"Unable to run Docker: {redactor(str(exc))}", 5) from exc
+    except (OSError, subprocess.SubprocessError):
+        raise RunnerError("Unable to run Docker safely", 5) from None
     if result.returncode != 0:
-        detail = redactor((result.stderr or result.stdout).strip())
-        raise RunnerError(f"Docker command failed: {detail or 'no diagnostic output'}", 5)
+        raise RunnerError("Docker command failed; diagnostic output was suppressed", 5)
     return result
 
 
@@ -438,10 +444,10 @@ def _file_lock(path: Path, *, label: str) -> Iterator[None]:
         ):
             raise ConfigurationError(f"{label} publishing lock must be one regular file")
         _lock_descriptor(descriptor)
-    except OSError as exc:
+    except OSError:
         if descriptor is not None:
             os.close(descriptor)
-        raise ConfigurationError(f"Unable to lock {label}") from exc
+        raise ConfigurationError(f"Unable to lock {label}") from None
     except BaseException:
         if descriptor is not None:
             os.close(descriptor)
@@ -543,7 +549,16 @@ def _is_reparse_path(path: Path) -> bool:
     return bool(attributes & 0x400)
 
 
-def _assert_registry_auth_target(project: Path, path: Path) -> None:
+def _assert_registry_auth_target(
+    project: Path, deployment: EnvironmentConfig, path: Path
+) -> None:
+    if deployment.schema_version == 2:
+        if deployment.external_secret_context is None:
+            raise ConfigurationError(
+                f"External registry authentication store is unavailable for "
+                f"{deployment.environment}"
+            )
+        return
     current = path
     while True:
         if current.is_symlink() or _is_reparse_path(current):
@@ -584,7 +599,21 @@ def _assert_registry_auth_target(project: Path, path: Path) -> None:
 
 
 def _create_registry_auth(path: Path, content: bytes) -> tuple[int, int, int, int]:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        return _create_registry_auth_unchecked(path, content)
+    except ConfigurationError as exc:
+        # Preserve the safe operational category while severing any low-level
+        # exception chain that could contain the external-store path.
+        raise ConfigurationError(str(exc)) from None
+    except (OSError, SecretFileError):
+        raise ConfigurationError(
+            "Unable to create protected registry authentication"
+        ) from None
+
+
+def _create_registry_auth_unchecked(
+    path: Path, content: bytes
+) -> tuple[int, int, int, int]:
     temporary = _durable_temporary(
         path,
         prefix=f".{path.name}.candidate.",
@@ -594,21 +623,23 @@ def _create_registry_auth(path: Path, content: bytes) -> tuple[int, int, int, in
     try:
         secure_secret_permissions(temporary)
         os.link(temporary, path, follow_symlinks=False)
-    except (OSError, SecretFileError) as exc:
+    except (OSError, SecretFileError):
         temporary.unlink(missing_ok=True)
         raise ConfigurationError(
             "Unable to create protected registry authentication; "
             "existing files are never overwritten"
-        ) from exc
+        ) from None
     try:
         temporary.unlink()
-    except OSError as exc:
+    except OSError:
         try:
             if path.samefile(temporary):
                 path.unlink(missing_ok=True)
         finally:
             temporary.unlink(missing_ok=True)
-        raise ConfigurationError("Unable to finalize protected registry authentication") from exc
+        raise ConfigurationError(
+            "Unable to finalize protected registry authentication"
+        ) from None
     return _signature(path)
 
 
@@ -630,15 +661,23 @@ def _new_registry_auth_transaction(path: Path, content: bytes) -> Iterator[None]
     try:
         yield
     except BaseException:
+        verification_failed = False
         try:
             owned = _signature(path) == committed_signature and path.read_bytes() == content
         except OSError:
             owned = False
+            verification_failed = True
         if owned:
             try:
                 path.unlink()
             except OSError:
-                pass
+                raise ConfigurationError(
+                    "Registry authentication transaction failed and rollback failed"
+                ) from None
+        elif verification_failed:
+            raise ConfigurationError(
+                "Registry authentication transaction failed and rollback could not be verified"
+            ) from None
         raise
 
 
@@ -662,6 +701,25 @@ def publish_images(
     registry_host = "ghcr.io" if registry == "ghcr" else "docker.io"
     _, deployment = load_configuration(project, environment)
     registry_auth_path = deployment.application.registry_auth_file
+    if registry_auth_path is not None and deployment.schema_version == 2:
+        context = deployment.external_secret_context
+        if context is None:
+            raise ConfigurationError(
+                f"External registry authentication store is unavailable for {environment}"
+            )
+        context_project, root, trusted_base, validate_base = context
+        try:
+            ensure_external_parent_for_write(
+                context_project,
+                root,
+                registry_auth_path,
+                trusted_base=trusted_base,
+                validate_trusted_base=validate_base,
+            )
+        except SecretStoreError:
+            raise ConfigurationError(
+                f"Unable to prepare registry authentication store for {environment}"
+            ) from None
     run_tag = f"{selected_tag[:111]}-{uuid.uuid4().hex[:12]}"
     with _publish_locks(compose, registry_auth_path):
         # Complete YAML/service preflight happens under the interprocess lock and
@@ -671,14 +729,18 @@ def publish_images(
         create_registry_auth = False
         existing_auth_snapshot: tuple[tuple[int, int, int, int], bytes] | None = None
         if registry_auth_path is not None:
-            _assert_registry_auth_target(project, registry_auth_path)
+            _assert_registry_auth_target(project, deployment, registry_auth_path)
             if registry_auth_path.exists():
                 validate_registry_auth(
                     deployment, expected_registry_host=registry_host
                 )
                 existing_auth_snapshot = (
                     _signature(registry_auth_path),
-                    registry_auth_path.read_bytes(),
+                    read_external_secret_bytes(
+                        deployment,
+                        registry_auth_path,
+                        field="registry authentication",
+                    ),
                 )
             else:
                 create_registry_auth = True

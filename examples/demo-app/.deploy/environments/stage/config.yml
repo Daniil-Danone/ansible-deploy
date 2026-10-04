@@ -1,25 +1,25 @@
 ---
-schema_version: 1
+schema_version: 2
 environment: stage
 server:
   host: 192.0.2.10
   ssh_port: 22
   bootstrap_user: root
   deploy_user: deploy
-  ssh_key: .deploy/keys/stage_ed25519
-  public_key: .deploy/keys/stage_ed25519.pub
+  ssh_key: keys/stage_ed25519
+  public_key: keys/stage_ed25519.pub
   host_key_fingerprints:
     - SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 application:
   compose: deploy/compose.stage.yml
-  env_file: .deploy/environments/stage/app.env
-  registry_auth_file: .deploy/environments/stage/registry-auth.json
+  env_file: environments/stage/app.env
+  registry_auth_file: environments/stage/registry-auth.json
   remote_dir: /srv/demo-stage
   allowed_loopback_ports: [8080]
 collector:
   push_url: https://grafana.example.com/loki/api/v1/push
   username: alloy
-  password_file: .deploy/environments/stage/collector.password
+  password_file: environments/stage/collector.password
 domain: stage.example.com
 acme_email: ops@example.com
 health_path: /health

@@ -8,11 +8,15 @@ from pathlib import Path
 
 import yaml
 
+from .config import read_external_secret_bytes
 from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .runner import AnsibleRunner, RunnerError, ansible_vars, prepare_state_directory
 
 
 def deployment_manifest(config: EnvironmentConfig) -> tuple[str, list[str]]:
+    env_bytes = read_external_secret_bytes(
+        config, config.application.env_file, field="application environment"
+    )
     compose_bytes = config.application.compose.read_bytes()
     compose = yaml.safe_load(compose_bytes)
     images = sorted(
@@ -37,12 +41,19 @@ def deployment_manifest(config: EnvironmentConfig) -> tuple[str, list[str]]:
             ).encode(),
         ),
         ("compose", compose_bytes),
-        ("env", config.application.env_file.read_bytes()),
+        ("env", env_bytes),
         ("images", json.dumps(images, separators=(",", ":")).encode()),
     ]
     registry = config.application.registry_auth_file
     if registry is not None:
-        inputs.append(("registry_auth", registry.read_bytes()))
+        inputs.append(
+            (
+                "registry_auth",
+                read_external_secret_bytes(
+                    config, registry, field="registry authentication"
+                ),
+            )
+        )
     digest = hashlib.sha256()
     for name, value in inputs:
         digest.update(name.encode() + b"\0" + len(value).to_bytes(8, "big") + value)

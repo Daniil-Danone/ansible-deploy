@@ -92,3 +92,15 @@
           ansible.builtin.file:
             path: "{{ app_dir }}/transaction.json"
             state: absent
+      rescue:
+        - name: Diagnose services after failed release recovery
+          ansible.builtin.include_role:
+            name: compose_diagnostics
+          vars:
+            compose_diagnostic_dir: "{{ app_dir }}/current"
+            compose_diagnostic_project: "{{ app_compose_project }}"
+            compose_diagnostic_user: "{{ deploy_user }}"
+
+        - name: Preserve release recovery failure
+          ansible.builtin.fail:
+            msg: "Release recovery failed; safe diagnostics are shown above"

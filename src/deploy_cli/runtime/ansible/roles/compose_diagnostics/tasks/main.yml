@@ -1,0 +1,94 @@
+---
+- name: Collect bounded Compose service state
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-directory
+      - "{{ compose_diagnostic_dir }}"
+      - -f
+      - "{{ compose_diagnostic_dir }}/compose.yml"
+      - -p
+      - "{{ compose_diagnostic_project }}"
+      - ps
+      - --all
+      - --format
+      - json
+  become: "{{ compose_diagnostic_user | default('') | length > 0 }}"
+  become_user: "{{ compose_diagnostic_user | default(omit) }}"
+  changed_when: false
+  failed_when: false
+  register: compose_diagnostic_ps
+
+- name: Find failed Compose services
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-directory
+      - "{{ compose_diagnostic_dir }}"
+      - -f
+      - "{{ compose_diagnostic_dir }}/compose.yml"
+      - -p
+      - "{{ compose_diagnostic_project }}"
+      - ps
+      - --all
+      - --services
+      - --filter
+      - "status={{ item }}"
+  loop: [exited, dead, restarting]
+  become: "{{ compose_diagnostic_user | default('') | length > 0 }}"
+  become_user: "{{ compose_diagnostic_user | default(omit) }}"
+  changed_when: false
+  failed_when: false
+  register: compose_diagnostic_failed_queries
+
+- name: Find unhealthy Compose services
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - --filter
+      - "label=com.docker.compose.project={{ compose_diagnostic_project }}"
+      - --filter
+      - health=unhealthy
+      - --format
+      - "{{ '{{.Label \"com.docker.compose.service\"}}' }}"
+  become: "{{ compose_diagnostic_user | default('') | length > 0 }}"
+  become_user: "{{ compose_diagnostic_user | default(omit) }}"
+  changed_when: false
+  failed_when: false
+  register: compose_diagnostic_unhealthy_query
+
+- name: Select failed services or bounded all-service fallback
+  ansible.builtin.set_fact:
+    compose_diagnostic_services: >-
+      {{ ((compose_diagnostic_failed_queries.results | map(attribute='stdout_lines') | flatten)
+      + (compose_diagnostic_unhealthy_query.stdout_lines | default([]))) | reject('equalto', '')
+      | unique | list }}
+
+- name: Collect bounded Compose logs for failed services
+  ansible.builtin.command:
+    argv: >-
+      {{ ['docker', 'compose', '--project-directory', compose_diagnostic_dir,
+      '-f', compose_diagnostic_dir + '/compose.yml', '-p', compose_diagnostic_project,
+      'logs', '--no-color', '--tail', '100'] +
+      (compose_diagnostic_services if compose_diagnostic_services | length > 0 else []) }}
+  become: "{{ compose_diagnostic_user | default('') | length > 0 }}"
+  become_user: "{{ compose_diagnostic_user | default(omit) }}"
+  changed_when: false
+  failed_when: false
+  register: compose_diagnostic_logs
+
+- name: Show safe bounded Compose diagnostics
+  ansible.builtin.debug:
+    msg:
+      compose_ps: >-
+        {{ compose_diagnostic_ps.stdout
+        if compose_diagnostic_ps.rc == 0 else 'docker compose ps unavailable' }}
+      log_scope: >-
+        {{ compose_diagnostic_services
+        if compose_diagnostic_services | length > 0 else ['all services (fallback)'] }}
+      logs: >-
+        {{ compose_diagnostic_logs.stdout
+        if compose_diagnostic_logs.rc == 0 else 'docker compose logs unavailable' }}

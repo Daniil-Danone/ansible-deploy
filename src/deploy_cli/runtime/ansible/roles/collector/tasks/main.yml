@@ -45,14 +45,27 @@
             - /run/log/journal:/run/log/journal:ro
           restart: unless-stopped
 
-- name: Reconcile Alloy collector independently from application releases
-  community.docker.docker_compose_v2:
-    project_src: "{{ collector_dir }}"
-    files: [compose.yml]
-    project_name: "ansible_deploy_collector_{{ app_environment }}"
-    pull: missing
-    state: present
-    remove_orphans: true
-    wait: true
-  no_log: true
+- name: Reconcile Alloy collector with safe failure diagnostics
   when: not ansible_check_mode
+  block:
+    - name: Reconcile Alloy collector independently from application releases
+      community.docker.docker_compose_v2:
+        project_src: "{{ collector_dir }}"
+        files: [compose.yml]
+        project_name: "ansible_deploy_collector_{{ app_environment }}"
+        pull: missing
+        state: present
+        remove_orphans: true
+        wait: true
+      no_log: true
+  rescue:
+    - name: Diagnose failed collector service
+      ansible.builtin.include_role:
+        name: compose_diagnostics
+      vars:
+        compose_diagnostic_dir: "{{ collector_dir }}"
+        compose_diagnostic_project: "ansible_deploy_collector_{{ app_environment }}"
+
+    - name: Preserve collector reconciliation failure
+      ansible.builtin.fail:
+        msg: "Collector Compose reconciliation failed; safe diagnostics are shown above"

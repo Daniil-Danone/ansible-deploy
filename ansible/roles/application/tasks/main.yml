@@ -139,22 +139,36 @@
     group: "{{ deploy_user }}"
   when: not ansible_check_mode
 
-- name: Reconcile candidate application services
-  community.docker.docker_compose_v2:
-    project_src: "{{ app_dir }}/candidate"
-    files: [compose.yml]
-    env_files: [.env]
-    project_name: "{{ app_compose_project }}"
-    pull: always
-    state: present
-    remove_orphans: true
-    wait: true
-    wait_timeout: 120
-  become_user: "{{ deploy_user }}"
-  become: true
-  no_log: true
-  register: candidate_compose
+- name: Reconcile candidate application services with safe failure diagnostics
   when: not ansible_check_mode
+  block:
+    - name: Reconcile candidate application services
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}/candidate"
+        files: [compose.yml]
+        env_files: [.env]
+        project_name: "{{ app_compose_project }}"
+        pull: always
+        state: present
+        remove_orphans: true
+        wait: true
+        wait_timeout: 120
+      become_user: "{{ deploy_user }}"
+      become: true
+      no_log: true
+      register: candidate_compose
+  rescue:
+    - name: Diagnose failed candidate services
+      ansible.builtin.include_role:
+        name: compose_diagnostics
+      vars:
+        compose_diagnostic_dir: "{{ app_dir }}/candidate"
+        compose_diagnostic_project: "{{ app_compose_project }}"
+        compose_diagnostic_user: "{{ deploy_user }}"
+
+    - name: Preserve candidate reconciliation failure
+      ansible.builtin.fail:
+        msg: "Candidate Compose reconciliation failed; safe diagnostics are shown above"
 
 - name: Require every candidate service to be running and healthy
   ansible.builtin.assert:

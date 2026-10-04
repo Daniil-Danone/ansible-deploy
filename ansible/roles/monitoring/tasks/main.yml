@@ -167,17 +167,30 @@
         loki-data: {}
         grafana-data: {}
 
-- name: Reconcile monitoring Compose services
-  community.docker.docker_compose_v2:
-    project_src: "{{ monitoring_dir }}"
-    files: [compose.yml]
-    project_name: ansible_deploy_monitoring
-    pull: missing
-    state: present
-    remove_orphans: true
-    wait: true
-  no_log: true
+- name: Reconcile monitoring Compose services with safe failure diagnostics
   when: not ansible_check_mode
+  block:
+    - name: Reconcile monitoring Compose services
+      community.docker.docker_compose_v2:
+        project_src: "{{ monitoring_dir }}"
+        files: [compose.yml]
+        project_name: ansible_deploy_monitoring
+        pull: missing
+        state: present
+        remove_orphans: true
+        wait: true
+      no_log: true
+  rescue:
+    - name: Diagnose failed monitoring services
+      ansible.builtin.include_role:
+        name: compose_diagnostics
+      vars:
+        compose_diagnostic_dir: "{{ monitoring_dir }}"
+        compose_diagnostic_project: ansible_deploy_monitoring
+
+    - name: Preserve monitoring reconciliation failure
+      ansible.builtin.fail:
+        msg: "Monitoring Compose reconciliation failed; safe diagnostics are shown above"
 
 - name: Detect existing monitoring certificate
   ansible.builtin.stat:

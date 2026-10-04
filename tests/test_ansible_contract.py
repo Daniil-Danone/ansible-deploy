@@ -77,6 +77,25 @@ def test_release_metadata_and_rollback_preserve_safe_permissions_and_health() ->
     assert "Restore original current-version metadata" in restore
 
 
+def test_compose_failures_collect_bounded_safe_diagnostics() -> None:
+    diagnostics = _text("ansible/roles/compose_diagnostics/tasks/main.yml")
+    application = _text("ansible/roles/application/tasks/main.yml")
+    rollback = _text("ansible/playbooks/rollback.yml")
+    abort = _text("ansible/playbooks/abort_release.yml")
+    monitoring = _text("ansible/roles/monitoring/tasks/main.yml")
+    collector = _text("ansible/roles/collector/tasks/main.yml")
+
+    assert "ansible.builtin.command:\n    argv:" in diagnostics
+    assert "ps\n      - --all\n      - --format\n      - json" in diagnostics
+    assert "'logs', '--no-color', '--tail', '100'" in diagnostics
+    assert "failed_when: false" in diagnostics
+    for forbidden in ("compose config", "inspect", "printenv", "ansible.builtin.shell"):
+        assert forbidden not in diagnostics
+    for workflow in (application, rollback, abort, monitoring, collector):
+        assert "name: compose_diagnostics" in workflow
+        assert "safe diagnostics are shown above" in workflow
+
+
 def test_legacy_stage_is_verified_before_secure_snapshot_and_commit() -> None:
     adoption = _text("ansible/roles/legacy_adoption/tasks/main.yml")
     site = _text("ansible/playbooks/site.yml")

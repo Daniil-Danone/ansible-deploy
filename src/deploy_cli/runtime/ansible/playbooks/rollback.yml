@@ -54,21 +54,35 @@
         owner: "{{ deploy_user }}"
         group: "{{ deploy_user }}"
 
-    - name: Reconcile rollback candidate without pulling images
-      community.docker.docker_compose_v2:
-        project_src: "{{ app_dir }}/candidate"
-        files: [compose.yml]
-        env_files: [.env]
-        project_name: "{{ app_compose_project }}"
-        pull: never
-        state: present
-        remove_orphans: true
-        wait: true
-        wait_timeout: 120
-      become_user: "{{ deploy_user }}"
-      become: true
-      no_log: true
-      register: rollback_compose
+    - name: Reconcile rollback candidate with safe failure diagnostics
+      block:
+        - name: Reconcile rollback candidate without pulling images
+          community.docker.docker_compose_v2:
+            project_src: "{{ app_dir }}/candidate"
+            files: [compose.yml]
+            env_files: [.env]
+            project_name: "{{ app_compose_project }}"
+            pull: never
+            state: present
+            remove_orphans: true
+            wait: true
+            wait_timeout: 120
+          become_user: "{{ deploy_user }}"
+          become: true
+          no_log: true
+          register: rollback_compose
+      rescue:
+        - name: Diagnose failed rollback services
+          ansible.builtin.include_role:
+            name: compose_diagnostics
+          vars:
+            compose_diagnostic_dir: "{{ app_dir }}/candidate"
+            compose_diagnostic_project: "{{ app_compose_project }}"
+            compose_diagnostic_user: "{{ deploy_user }}"
+
+        - name: Preserve rollback reconciliation failure
+          ansible.builtin.fail:
+            msg: "Rollback Compose reconciliation failed; safe diagnostics are shown above"
 
     - name: Require every rollback service to be running and healthy
       ansible.builtin.assert:

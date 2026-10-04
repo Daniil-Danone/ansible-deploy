@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:\\Code\\MyRepos\\ansible-deploy\\ansible-deploy\\.codex\\hooks\\flow-lint.py\" --pre-commit",
+            "command": "python \".codex/hooks/flow-lint.py\" --pre-commit",
             "timeout": 15
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:\\Code\\MyRepos\\ansible-deploy\\ansible-deploy\\.codex\\hooks\\protect-env.py\" --pre-tool",
+            "command": "python \".codex/hooks/protect-env.py\" --pre-tool",
             "timeout": 10
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:\\Code\\MyRepos\\ansible-deploy\\ansible-deploy\\.codex\\hooks\\big-file-guard.py\" --pre-tool",
+            "command": "python \".codex/hooks/big-file-guard.py\" --pre-tool",
             "timeout": 10
           }
         ]
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:\\Code\\MyRepos\\ansible-deploy\\ansible-deploy\\.codex\\hooks\\protect-migrations.py\" --pre-tool",
+            "command": "python \".codex/hooks/protect-migrations.py\" --pre-tool",
             "timeout": 10
           }
         ]
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:\\Code\\MyRepos\\ansible-deploy\\ansible-deploy\\.codex\\hooks\\flow-lint.py\" --pre-write",
+            "command": "python \".codex/hooks/flow-lint.py\" --pre-write",
             "timeout": 10
           }
         ]
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:\\Code\\MyRepos\\ansible-deploy\\ansible-deploy\\.codex\\hooks\\flow-lint.py\" --pre-compact",
+            "command": "python \".codex/hooks/flow-lint.py\" --pre-compact",
             "timeout": 15
           }
         ]
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:\\Code\\MyRepos\\ansible-deploy\\ansible-deploy\\.codex\\hooks\\flow-lint.py\" --session-start",
+            "command": "python \".codex/hooks/flow-lint.py\" --session-start",
             "timeout": 15
           }
         ]

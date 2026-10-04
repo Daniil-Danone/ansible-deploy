@@ -13,7 +13,8 @@ Deploy key создаётся автоматически при первом о�
 использует Ed25519 без passphrase, создаёт пару только при отсутствии обеих частей,
 не перезаписывает существующую и отклоняет symlink/неполную/небезопасную пару.
 
-Пути задаются в `config.yml`; обычно `.deploy/keys/stage_ed25519` и `.pub`. Они ignored.
+Пути задаются в `config.yml`; обычно `keys/stage_ed25519` и `.pub` относительно
+внешнего root из `deploy secrets path`. Private и public key не размещаются в worktree.
 На POSIX private получает `0600`, на Windows owner-only ACL. В Ansible container ключ
 копируется в tmpfs с `0600`, поэтому Docker Desktop mount `0777` не ломает OpenSSH.
 

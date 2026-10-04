@@ -23,9 +23,9 @@
 | T19 | Destination collision запрещает overwrite и оставляет source/config неизменными | integration ! | | 5 | [ ] |
 | T20 | Ошибка посередине migration атомарно откатывает destination/config | integration ! | | 5 | [ ] |
 | T21 | Tracked legacy source требует rotation warning и никогда не удаляется автоматически | integration ! | | 5 | [ ] |
-| T22 | Demo copy + init оставляет Git worktree без известных real-secret filenames | integration ! | | 6 | [ ] |
-| T23 | CI создаёт store под runner temp без echo и удаляет его в `always()` cleanup | contract ! | | 6 | [ ] |
-| T24 | README ведёт по одному пути install → init → secrets → deploy, команды проходят smoke parsing | contract | | 6 | [ ] |
+| T22 | Demo copy + init оставляет Git worktree без известных real-secret filenames | integration ! | `tests/test_project_sync.py::test_scaffold_contains_no_runtime_secret_files_or_values` | 6 | [x] |
+| T23 | CI создаёт store под runner temp без echo и удаляет его в `always()` cleanup | contract ! | `tests/test_ci_contract.py` | 6 | [x] |
+| T24 | README ведёт по одному пути install → init → secrets → deploy, команды проходят smoke parsing | contract | `tests/test_docs_contract.py`, `tests/test_project_sync.py` | 6 | [x] |
 
 `!` требует красного прогона на временно отключённой защите и зелёного после
 восстановления защиты; оба вывода фиксируются в `flow/01-external-secrets/log/`.

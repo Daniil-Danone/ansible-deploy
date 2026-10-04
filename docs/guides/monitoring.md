@@ -1,10 +1,11 @@
 # Централизованные логи
 
 1. Настройте monitoring config, DNS и SSH fingerprint.
-2. Скопируйте `.env.example` в `monitoring.env`, задайте Grafana password, общий Loki
-   push username и crypt SHA-512 hash пароля (`openssl passwd -6`).
-3. Создайте одинаковый plaintext `collector.password` для Stage/Prod и ограничьте
-   доступ к secret-файлам текущим пользователем (`chmod 600` либо Windows ACL).
+2. Во внешнем root из `deploy secrets path` создайте
+   `environments/monitoring/monitoring.env`, задайте Grafana password, Loki username и
+   crypt SHA-512 hash пароля (`openssl passwd -6`).
+3. Там же создайте отдельные `environments/{stage,prod}/collector.password` и
+   ограничьте доступ текущим пользователем (`chmod 600` либо Windows ACL).
 
 ```text
 deploy monitoring deploy --ask-bootstrap-password
@@ -43,8 +44,8 @@ Retention задаёт `monitoring.retention_days`.
 2. Выйдите и проверьте вход временным администратором.
 3. Через Grafana UI смените пароль постоянного администратора; не используйте CLI-флаг,
    shell history, argv или диагностический log для передачи нового пароля.
-4. Проверьте новый вход, обновите `GF_SECURITY_ADMIN_PASSWORD` в локальном secret-файле
-   как recovery seed и выполните `deploy monitoring update` для безопасной доставки.
+4. Проверьте новый вход, обновите `GF_SECURITY_ADMIN_PASSWORD` во внешнем secret-файле
+   как recovery seed и выполните `deploy monitoring update`.
 5. Удалите временного администратора через UI.
 
 Значение recovery seed не изменяет уже существующую Grafana DB, но необходимо для

@@ -99,7 +99,7 @@ password-only bootstrap используйте `--ask-bootstrap-password`.
 ## Disaster recovery Production
 
 При потере VPS сначала сохраните evidence и остановите автоматические deploy jobs.
-Поднимите чистый Ubuntu 24.04, обновите Production host/fingerprint/DNS, выполните
+Поднимите чистый Ubuntu 24.04 или 26.04, обновите Production host/fingerprint/DNS, выполните
 обычный idempotent Production deploy, затем выберите подтверждённый backup и следуйте
 отдельно согласованной процедуре восстановления на Production. Restore Drill команда
 не должна использоваться для обхода Production safeguards.

@@ -1,0 +1,84 @@
+---
+- name: Bootstrap a supported Ubuntu target as root
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    ansible_user: root
+    deploy_user: deploytest
+  tasks:
+    - name: Require a supported Ubuntu LTS target image
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_version == expected_ubuntu_version
+        fail_msg: >-
+          Expected Ubuntu {{ expected_ubuntu_version }}, got
+          {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+
+    - name: Report target Python interpreter
+      ansible.builtin.debug:
+        msg: "Target Python {{ ansible_facts.python_version }}"
+
+    - name: Apply production bootstrap role
+      ansible.builtin.include_role:
+        name: bootstrap
+
+- name: Provision the base server stack as the deployment account
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    ansible_user: deploytest
+    deploy_user: deploytest
+    deploy_ssh_port: 22
+    hardening_controls:
+      ssh: true
+      firewall: true
+      fail2ban: true
+      unattended_upgrades: true
+    security_updates_enabled: true
+    reboot_enabled: true
+    reboot_time: "04:00"
+    reboot_timezone: Europe/Moscow
+  roles:
+    - role: common
+    - role: hardening
+    - role: security_updates
+    - role: docker
+    - role: reboot_timer
+  post_tasks:
+    - name: Read provisioned service states
+      ansible.builtin.service_facts:
+
+    - name: Read reboot timer state
+      ansible.builtin.systemd_service:
+        name: deploy-reboot-if-required.timer
+      register: provisioned_reboot_timer
+
+    - name: Read firewall status
+      ansible.builtin.command: ufw status
+      changed_when: false
+      register: provisioned_firewall
+
+    - name: Require the packaged fail2ban SSH jail to be loaded
+      ansible.builtin.command: fail2ban-client status sshd
+      changed_when: false
+
+    - name: Report effective sudo implementation
+      ansible.builtin.command: sudo --version
+      become: false
+      changed_when: false
+      register: sudo_implementation
+
+    - name: Show effective sudo implementation
+      ansible.builtin.debug:
+        msg: "{{ sudo_implementation.stdout_lines | first }}"
+
+    - name: Require provisioned services and firewall to be active
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['fail2ban.service'].state == 'running'
+          - ansible_facts.services['docker.service'].state == 'running'
+          - provisioned_reboot_timer.status.ActiveState == 'active'
+          - "'Status: active' in provisioned_firewall.stdout"

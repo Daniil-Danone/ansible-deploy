@@ -34,7 +34,11 @@
       - "'passwordauthentication no' in staged_sshd.stdout_lines"
       - "'kbdinteractiveauthentication no' in staged_sshd.stdout_lines"
       - "'pubkeyauthentication yes' in staged_sshd.stdout_lines"
-      - "'permitrootlogin without-password' in staged_sshd.stdout_lines"
+      # sshd -T prints the legacy alias on OpenSSH 9.6 (Ubuntu 24.04)
+      # and the canonical prohibit-password on OpenSSH 10.2 (Ubuntu 26.04).
+      - >-
+        'permitrootlogin prohibit-password' in staged_sshd.stdout_lines
+        or 'permitrootlogin without-password' in staged_sshd.stdout_lines
     quiet: true
   when: hardening_controls.ssh and not ansible_check_mode
 
@@ -76,7 +80,9 @@
       - "'passwordauthentication no' in effective_sshd.stdout_lines"
       - "'kbdinteractiveauthentication no' in effective_sshd.stdout_lines"
       - "'pubkeyauthentication yes' in effective_sshd.stdout_lines"
-      - "'permitrootlogin without-password' in effective_sshd.stdout_lines"
+      - >-
+        'permitrootlogin prohibit-password' in effective_sshd.stdout_lines
+        or 'permitrootlogin without-password' in effective_sshd.stdout_lines
     quiet: true
   when: hardening_controls.ssh and not ansible_check_mode
 

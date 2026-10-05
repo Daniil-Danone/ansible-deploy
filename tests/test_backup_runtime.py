@@ -166,7 +166,7 @@ def test_file_source_rejects_symlink(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlinks are unavailable")
 
-    with pytest.raises(runtime.BackupFailure, match="unsafe"):
+    with pytest.raises(runtime.BackupFailure, match="symlink"):
         runtime._selected_paths({"type": "file", "path": str(link)})
 
 
@@ -329,6 +329,9 @@ def test_restore_file_preserves_mode_mtime_and_is_writable(tmp_path: Path) -> No
     member.size = len(b"payload")
     member.mode = 0o660
     member.mtime = 1_700_000_000
+    if hasattr(os, "getuid"):
+        member.uid = os.getuid()
+        member.gid = os.getgid()
     with tarfile.open(archive_path, "w") as archive:
         archive.addfile(member, io.BytesIO(b"payload"))
     target = tmp_path / "restore" / "target.txt"
@@ -786,7 +789,7 @@ def test_backup_with_fake_age_and_rclone_is_verified_and_idempotent(
             {
                 "type": "file",
                 "path": str(source),
-                "restore_destination": str(tmp_path / "restored.txt"),
+                "restore_destination": "restored.txt",
             }
         ],
         "remote": "drive:backups",

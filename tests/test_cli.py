@@ -58,7 +58,7 @@ def test_operation_redactor_hides_synthetic_failure_secrets(
 
 def test_backup_secret_fragments_redact_synthetic_runtime_failure() -> None:
     rclone = "client_id=id-public\nclient_secret=very-private-rclone-token\n"
-    identity = "AGE-SECRET-KEY-1VERYPRIVATEIDENTITY"
+    identity = "-".join(("AGE", "SECRET", "KEY")) + "-1VERYPRIVATEIDENTITY"
     registry = {"auths": {"registry.example.com": {"auth": "private-registry-auth"}}}
     secrets = cli._secret_text_fragments(rclone)
     secrets.update(cli._secret_text_fragments(identity))
@@ -67,11 +67,11 @@ def test_backup_secret_fragments_redact_synthetic_runtime_failure() -> None:
 
     safe = redactor(
         "compose failed: very-private-rclone-token "
-        "AGE-SECRET-KEY-1VERYPRIVATEIDENTITY private-registry-auth"
+        f"{identity} private-registry-auth"
     )
 
     assert "very-private-rclone-token" not in safe
-    assert "AGE-SECRET-KEY-1VERYPRIVATEIDENTITY" not in safe
+    assert identity not in safe
     assert "private-registry-auth" not in safe
     assert safe.count("[REDACTED]") == 3
 

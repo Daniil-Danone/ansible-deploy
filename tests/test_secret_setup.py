@@ -96,6 +96,37 @@ def test_secrets_init_reports_values_the_operator_must_fill(
     assert str(_store_root()) not in output
 
 
+def test_secrets_init_creates_declared_per_service_and_collector_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = _demo_project(tmp_path)
+    config_path = project / ".deploy/environments/stage/config.yml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["application"]["extra_env_files"] = [
+        {"source": "environments/stage/postgres.env", "target": "postgres.env"}
+    ]
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    assert cli.run(["--project-dir", str(project), "secrets", "init", "stage"]) == 0
+
+    service_env = _store_root() / "environments/stage/postgres.env"
+    password = _store_root() / "environments/stage/collector.password"
+    assert service_env.is_file()
+    assert service_env.read_bytes() == b""
+    validate_secret_permissions(service_env)
+    assert password.is_file()
+    validate_secret_permissions(password)
+    output = capsys.readouterr().out
+    assert "[CREATE] environments/stage/postgres.env" in output
+    assert "no template" in output
+
+    # A second run keeps the operator's content untouched.
+    service_env.write_bytes(b"POSTGRES_PASSWORD=kept\n")
+    assert cli.run(["--project-dir", str(project), "secrets", "init", "stage"]) == 0
+    assert service_env.read_bytes() == b"POSTGRES_PASSWORD=kept\n"
+    assert "[KEEP] environments/stage/postgres.env" in capsys.readouterr().out
+
+
 def test_hash_password_rejects_a_mismatch_before_running_the_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

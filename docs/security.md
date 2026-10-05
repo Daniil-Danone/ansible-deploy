@@ -8,8 +8,10 @@
   permissions, hardlink и symlink/reparse traversal непосредственно перед use.
 - Для Stage, Production, Monitoring и Restore используйте разные SSH/registry/runtime
   credentials. Registry pull token должен быть read-only.
-- SSH host fingerprints получайте по доверенному каналу. Private key не копируется на
-  server; bootstrap password не сохраняется.
+- SSH host fingerprints записывает `ansible-deploy trust <environment>`; сверяйте их с
+  консолью провайдера и коммитьте осознанно. Смена уже доверенного ключа требует
+  явного `--force`. Private key не копируется на server; bootstrap password не
+  сохраняется.
 - Production images закрепляются digest; deployment version — полный/допустимый Git
   SHA. Production operation требует confirmation или protected CI Environment.
 - Backup encrypted age identity и rclone credentials находятся во внешнем store;

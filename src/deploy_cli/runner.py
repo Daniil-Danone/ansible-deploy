@@ -12,6 +12,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
+from dataclasses import dataclass
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path, PurePosixPath
@@ -31,6 +32,15 @@ class RunnerError(RuntimeError):
     def __init__(self, message: str, exit_code: int) -> None:
         super().__init__(message)
         self.exit_code = exit_code
+
+
+@dataclass(frozen=True)
+class ScannedHostKey:
+    """One ``ssh-keyscan`` line with its key type and OpenSSH SHA256 fingerprint."""
+
+    line: str
+    key_type: str
+    fingerprint: str
 
 
 def extra_env_mount(target: str) -> str:
@@ -115,8 +125,8 @@ class AnsibleRunner:
             return False
         return result.returncode == 0 and result.stdout.strip() == runtime_hash
 
-    def trust_host(self, host: str, port: int, expected_fingerprints: list[str]) -> None:
-        self.state_dir = prepare_state_directory(self.project_dir, self.environment)
+    def scan_host_keys(self, host: str, port: int) -> tuple[ScannedHostKey, ...]:
+        """Scan the live SSH host keys; trust is decided by the caller, not here."""
         container_name = self._container_name()
         args = [
             "docker",
@@ -161,9 +171,23 @@ class AnsibleRunner:
         if result.returncode != 0 or not scanned:
             detail = self.redactor(result.stderr.strip())
             raise RunnerError(f"SSH host key scan failed: {detail or 'no key returned'}", 4)
-        trusted = {line for line in scanned if _fingerprint(line) in expected_fingerprints}
+        return tuple(_scanned_host_key(line) for line in sorted(scanned))
+
+    def trust_host(self, host: str, port: int, expected_fingerprints: list[str]) -> None:
+        if not expected_fingerprints:
+            raise RunnerError(
+                f"SSH host key is not trusted yet for {self.environment}; "
+                f"run 'ansible-deploy trust {self.environment}' first",
+                2,
+            )
+        self.state_dir = prepare_state_directory(self.project_dir, self.environment)
+        scanned = self.scan_host_keys(host, port)
+        trusted = {key.line for key in scanned if key.fingerprint in expected_fingerprints}
         if not trusted:
             raise RunnerError("SSH host key does not match a configured SHA256 fingerprint", 3)
+        self._store_known_hosts(trusted)
+
+    def _store_known_hosts(self, trusted: set[str]) -> None:
         known_hosts = self.state_dir / "known_hosts"
         if known_hosts.exists():
             existing = {
@@ -177,6 +201,52 @@ class AnsibleRunner:
             known_hosts.write_text(
                 "\n".join(sorted(trusted)) + "\n", encoding="utf-8", newline="\n"
             )
+
+    def openssl_password_hash(self, password: str) -> str:
+        """Compute a crypt SHA-512 hash inside the runtime container, never in argv."""
+        container_name = self._container_name()
+        args = [
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "--name",
+            container_name,
+            "--entrypoint",
+            "openssl",
+            self.runtime_image,
+            "passwd",
+            "-6",
+            "-stdin",
+        ]
+        completed = False
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed executable and argument vector
+                args,
+                cwd=self.repo,
+                input=password + "\n",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=60,
+            )
+            completed = True
+        except KeyboardInterrupt:
+            raise
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RunnerError("Unable to compute the crypt SHA-512 hash", 5) from exc
+        finally:
+            if not completed:
+                self._cleanup_container(container_name)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if result.returncode != 0 or len(lines) != 1 or not lines[0].startswith("$6$"):
+            detail = self.redactor(result.stderr.strip())
+            raise RunnerError(
+                f"Password hashing failed: {detail or 'no crypt SHA-512 hash returned'}", 5
+            )
+        return lines[0]
 
     def playbook(
         self,
@@ -441,6 +511,17 @@ class AnsibleRunner:
             return result.returncode
         except (OSError, subprocess.SubprocessError, KeyboardInterrupt):
             return -1
+
+
+def _scanned_host_key(known_host_line: str) -> ScannedHostKey:
+    fields = known_host_line.split()
+    if len(fields) < 3:
+        raise RunnerError("ssh-keyscan returned an invalid public key", 3)
+    return ScannedHostKey(
+        line=known_host_line,
+        key_type=fields[1],
+        fingerprint=_fingerprint(known_host_line),
+    )
 
 
 def _fingerprint(known_host_line: str) -> str:

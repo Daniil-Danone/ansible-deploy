@@ -16,29 +16,36 @@ git commit -m "chore: initialize deployment configuration"
 Restore skeleton. `.deploy/project-id` коммитится и остаётся стабильным после clone.
 `.deploy/template-state.yml` хранит версию шаблона и hashes, но не секреты.
 
-Отредактируйте global/environment configs, `.deploy/images.yml` и Compose. Зафиксируйте
-SSH host fingerprint из доверенного канала, а не из первого подключения.
+Отредактируйте global/environment configs, `.deploy/images.yml` и Compose. Host, domain и
+acme_email задаются вручную; `server.host_key_fingerprints` остаётся пустым — его
+заполняет `deploy trust <environment>` на шаге 3.
 
 ## 2. Подготовить внешний secret store
 
 ```bash
 deploy secrets path
+deploy secrets init
 ```
 
-Результат — project-scoped root реальных файлов. Создайте в нём с owner-only правами:
+`secrets path` печатает project-scoped root реальных файлов. `secrets init` создаёт в нём
+owner-only каталоги `environments/<env>/`, `keys/` и `backup/` и заготовки secret-файлов
+из закоммиченных `.env.example`. Существующий файл никогда не перезаписывается, повторный
+запуск идемпотентен. В отчёте `[CREATE]` — созданное, `[KEEP]` — уже существовавшее,
+`[FILL]` — переменные, которые обязан заполнить оператор.
+
+Остальные файлы создайте сами с owner-only правами:
 
 ```text
-environments/stage/app.env
-environments/prod/app.env
-environments/monitoring/monitoring.env
 environments/*/registry-auth.json
-keys/*_ed25519
+environments/*/collector.password
 backup/rclone.conf
 backup/age.key
 ```
 
 Пути schema v2 относительны этому root. Не копируйте файлы в `.deploy/`, не передавайте
-значения через CLI arguments и не печатайте их в CI logs.
+значения через CLI arguments и не печатайте их в CI logs. Crypt SHA-512 hash для
+`LOKI_PUSH_PASSWORD_HASH` считает `deploy secrets hash-password` — см.
+[monitoring](guides/monitoring.md).
 
 SSH key можно импортировать существующей парой или не создавать заранее: первый
 обычный deploy атомарно создаст Ed25519 pair по configured paths. Dry-run ключи не
@@ -48,10 +55,18 @@ Stage и Production.
 ## 3. Stage
 
 ```bash
+deploy trust stage
 deploy images publish stage --registry ghcr --namespace OWNER --username OWNER --ask-token --ask-pull-token
 deploy stage --ask-bootstrap-password --version GIT_SHA
 deploy status stage
 ```
+
+`trust stage` сканирует SSH host key сервера и записывает его fingerprint'ы в
+`.deploy/environments/stage/config.yml`. Сверьте напечатанные значения с консолью
+провайдера и закоммитьте изменение — доверие ключу остаётся осознанным шагом, а не
+побочным эффектом первого подключения. Пока список пуст, любая операция завершается
+кодом `2`. Если позже ключ изменился, команда ничего не перезаписывает и требует
+`--force`.
 
 На чистом VPS первый запуск должен быть обычным deploy: dry-run не выполняет bootstrap.
 После bootstrap проверьте следующую итерацию через `deploy stage --dry-run --version
@@ -65,6 +80,7 @@ Production использует отдельные VPS, domain, remote directory
 и registry credential. Images должны быть закреплены digest.
 
 ```bash
+deploy trust prod
 deploy images publish prod --registry ghcr --namespace OWNER --username OWNER --ask-token --ask-pull-token
 deploy prod --ask-bootstrap-password --version GIT_SHA
 deploy status prod
@@ -78,6 +94,7 @@ SHA не прошли успешно.
 ## 5. Monitoring и collectors
 
 ```bash
+deploy trust monitoring
 deploy monitoring deploy --ask-bootstrap-password
 deploy monitoring status
 deploy collectors deploy all --yes
@@ -97,6 +114,7 @@ host и service. HTTPS health monitoring не доказывает достав�
 deploy backup setup prod
 deploy backup run prod
 deploy backup list prod
+deploy trust restore
 deploy backup restore prod --target restore --backup BACKUP_ID
 ```
 

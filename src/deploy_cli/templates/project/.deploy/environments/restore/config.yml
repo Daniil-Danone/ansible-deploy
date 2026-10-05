@@ -9,7 +9,8 @@ server:
   deploy_user: deploy
   ssh_key: keys/restore_ed25519
   public_key: keys/restore_ed25519.pub
-  host_key_fingerprints: [SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD]
+  # Filled by `ansible-deploy trust restore`; empty means the host is not trusted yet.
+  host_key_fingerprints: []
 application:
   compose: deploy/compose.restore.yml
   env_file: environments/restore/app.env

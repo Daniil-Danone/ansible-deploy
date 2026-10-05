@@ -8,7 +8,8 @@ server:
   deploy_user: deploy
   ssh_key: keys/monitoring_ed25519
   public_key: keys/monitoring_ed25519.pub
-  host_key_fingerprints: [SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC]
+  # Filled by `ansible-deploy trust monitoring`; empty means the host is not trusted yet.
+  host_key_fingerprints: []
 domain: grafana.example.com
 acme_email: ops@example.com
 monitoring:

@@ -8,7 +8,8 @@
 
 1. Скопируйте каталог, выполните `deploy project init` и инициализируйте Git.
 2. Проверьте `compose.local.yml` и оба health endpoint.
-3. Заполните `.deploy/environments/stage/config.yml` реальными IP, fingerprint, доменом.
+3. Заполните `.deploy/environments/stage/config.yml` реальными IP и доменом, затем
+   выполните `deploy trust stage`.
 4. Выполните `deploy images publish stage ... --ask-token --ask-pull-token`.
 5. Закоммитьте изменённый `deploy/compose.stage.yml`.
 6. Выполните `deploy stage --ask-bootstrap-password`, затем `deploy status stage`.

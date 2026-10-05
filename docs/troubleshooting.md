@@ -8,13 +8,28 @@
 1. `deploy project sync --check` — устаревший scaffold или conflict?
 2. `deploy <environment> --dry-run` — config/path/Compose validation?
 3. DNS указывает на ожидаемый IP, provider firewall пропускает SSH/80/443?
-4. SSH fingerprint совпадает с данными provider console?
+4. `host key is not trusted yet` — выполните `deploy trust <environment>` и сверьте
+   напечатанные fingerprint'ы с provider console.
 5. Docker/Compose этап упал? Используйте автоматически напечатанные sanitized
    `docker compose ps` и ограниченные tails упавших services. В `--verbose` смотрите
    Ansible task, но не включайте shell tracing.
 6. Containers healthy, а public health нет — проверьте Nginx, TLS, loopback port и
    health path.
 7. Повторите ту же команду только после исправления config/credential/infra cause.
+
+## SSH host key не доверен или изменился
+
+`SSH host key is not trusted yet for <env>` (код `2`) означает пустой
+`server.host_key_fingerprints`: запустите `deploy trust <env>` и закоммитьте результат.
+
+`Scanned SSH host key does not match the fingerprints already trusted` (код `2`) —
+`trust` отказался перезаписывать список. Это либо переустановленный сервер, либо MITM:
+сверьте ключ с консолью провайдера и только после этого повторите с `--force`.
+`SSH host key does not match a configured SHA256 fingerprint` (код `3`) и `SSH host key
+changed since the previous trusted connection` (код `3`) приходят из самой операции —
+сервер не тот, которому доверяет config или сохранённый `.deploy-state/<env>/known_hosts`.
+`SSH host key scan failed` (код `4`) — сервер недоступен по SSH, проверьте DNS, port и
+provider firewall.
 
 ## Project sync conflict
 
@@ -38,6 +53,13 @@ docker compose -f /srv/APP/docker-compose.yml logs --tail=100 SERVICE
 
 Не запускайте `docker inspect`, `docker compose config` или `env`: они могут раскрыть
 environment values. Не вставляйте полный log в публичный issue без review.
+
+## Внешний secret store пуст
+
+`deploy secrets init` создаёт каталоги и заготовки, но не значения. `[FILL]` в отчёте
+перечисляет переменные, которые обязан заполнить оператор; `registry-auth.json`,
+`collector.password`, `rclone.conf` и `age.key` создаются вручную. Команда не
+перезаписывает существующие файлы, поэтому её можно повторять.
 
 ## External secret error
 

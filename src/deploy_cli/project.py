@@ -12,7 +12,7 @@ import yaml
 
 from .secret_store import create_project_id, load_project_id
 
-SCAFFOLD_VERSION = 1
+SCAFFOLD_VERSION = 2
 STATE_PATH = Path(".deploy/template-state.yml")
 
 

@@ -23,6 +23,7 @@ def test_init_is_idempotent_and_creates_all_environment_skeletons(tmp_path: Path
     assert (tmp_path / STATE_PATH).read_bytes() == first_state
     for environment in ("stage", "prod", "monitoring", "restore"):
         assert (tmp_path / f".deploy/environments/{environment}/config.yml").is_file()
+    assert (tmp_path / ".deploy/ci_image_contract.py").is_file()
 
 
 def test_generated_scaffold_loads_every_environment_and_has_complete_disabled_backup(

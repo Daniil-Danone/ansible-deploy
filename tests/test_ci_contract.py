@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -51,13 +52,13 @@ def test_reusable_deploy_has_protected_serial_environment_contract() -> None:
     assert validation["env"]["CLI_REPOSITORY_TOKEN"] == (
         "${{ secrets.CLI_REPOSITORY_TOKEN }}"  # noqa: S105 - expression
     )
-    pin = next(
+    apply = next(
         step
         for step in deploy["steps"]
-        if step.get("name") == "Pin verified application digest in Compose"
+        if step.get("name") == "Apply complete verified image map to Compose"
     )
-    assert pin["env"]["IMAGE_DIGEST"] == "${{ inputs.image_digest }}"
-    assert "service[\"image\"]" in pin["run"]
+    assert apply["env"]["IMAGE_MAP"] == "${{ inputs.image_map }}"
+    assert ".deploy/ci_image_contract.py apply" in apply["run"]
 
 
 def test_application_caller_keeps_pr_quality_only_and_gates_deployments() -> None:
@@ -65,37 +66,47 @@ def test_application_caller_keeps_pr_quality_only_and_gates_deployments() -> Non
     jobs = workflow["jobs"]
 
     assert "pull_request" in workflow["on"]
-    assert jobs["build"]["if"] == "github.event_name != 'pull_request'"
+    assert jobs["image_plan"]["if"] == "github.event_name != 'pull_request'"
     assert "pull_request" not in jobs["stage"]["if"]
-    assert jobs["build"]["needs"] == "quality"
-    assert jobs["stage"]["needs"] == ["quality", "build"]
-    assert jobs["production"]["needs"] == ["quality", "build", "stage"]
+    assert jobs["image_plan"]["needs"] == "quality"
+    assert jobs["build_images"]["needs"] == "image_plan"
+    assert jobs["collect_images"]["needs"] == ["image_plan", "build_images"]
+    assert jobs["stage"]["needs"] == ["quality", "collect_images"]
+    assert jobs["production"]["needs"] == ["quality", "collect_images", "stage"]
     assert jobs["stage"]["with"]["environment"] == "stage"
     assert jobs["production"]["with"]["environment"] == "production"
     assert jobs["stage"]["with"]["deployment_sha"] == (
-        "${{ needs.build.outputs.deployment_sha }}"
+        "${{ needs.collect_images.outputs.deployment_sha }}"
     )
-    assert jobs["stage"]["with"]["image_digest"] == (
-        "${{ needs.build.outputs.image_digest }}"
-    )
-    assert jobs["production"]["with"]["image_digest"] == (
-        "${{ needs.build.outputs.image_digest }}"
-    )
+    expected_map = "${{ needs.collect_images.outputs.image_map }}"
+    assert jobs["stage"]["with"]["image_map"] == expected_map
+    assert jobs["production"]["with"]["image_map"] == expected_map
 
 
-def test_application_build_maps_full_sha_to_verified_registry_digest() -> None:
+def test_application_build_uses_complete_matrix_and_collects_verified_map() -> None:
     workflow = _workflow(ROOT / ".github/examples/application-deploy.yml")
-    build = workflow["jobs"]["build"]
-    publish = next(step for step in build["steps"] if step.get("id") == "publish")
+    plan = workflow["jobs"]["image_plan"]
+    build = workflow["jobs"]["build_images"]
+    collect = workflow["jobs"]["collect_images"]
+    build_step = next(
+        step
+        for step in build["steps"]
+        if step.get("name") == "Build, push, and verify service image"
+    )
+    collect_step = next(step for step in collect["steps"] if step.get("id") == "collect")
 
     assert build["environment"] == "build"
     assert build["permissions"] == {"contents": "read", "packages": "write"}
-    assert publish["env"]["DEPLOYMENT_SHA"] == "${{ github.sha }}"
-    assert '"$IMAGE_REPOSITORY:$DEPLOYMENT_SHA"' in publish["run"]
-    assert "docker buildx build" in publish["run"]
-    assert "docker buildx imagetools inspect" in publish["run"]
-    assert "image_digest=%s" in publish["run"]
-    assert build["outputs"]["image_digest"] == "${{ steps.publish.outputs.image_digest }}"
+    assert build["strategy"]["fail-fast"] == "true"
+    assert build["strategy"]["matrix"] == "${{ fromJSON(needs.image_plan.outputs.matrix) }}"
+    assert plan["outputs"]["repositories"] == "${{ steps.plan.outputs.repositories }}"
+    assert build_step["env"]["SERVICE"] == "${{ matrix.service }}"
+    assert '"$REPOSITORY:$DEPLOYMENT_SHA"' in build_step["run"]
+    assert "docker buildx build" in build_step["run"]
+    assert "docker buildx imagetools inspect" in build_step["run"]
+    assert ".deploy/ci_image_contract.py result" in build_step["run"]
+    assert ".deploy/ci_image_contract.py collect" in collect_step["run"]
+    assert collect["outputs"]["image_map"] == "${{ steps.collect.outputs.image_map }}"
 
 
 def test_delivery_workflows_do_not_trace_or_artifact_secrets() -> None:
@@ -108,20 +119,34 @@ def test_delivery_workflows_do_not_trace_or_artifact_secrets() -> None:
     )
 
     assert "set -x" not in text
-    assert "actions/upload-artifact" not in text
     assert "echo " not in text
     assert "REGISTRY_TOKEN" not in text.replace("${{ secrets.REGISTRY_TOKEN }}", "")
+    workflow = _workflow(ROOT / ".github/examples/application-deploy.yml")
+    upload = next(
+        step
+        for step in workflow["jobs"]["build_images"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    )
+    assert upload["with"]["path"] == ".deploy-state/ci-images/${{ matrix.service }}.json"
+    assert "secret" not in upload["with"]["path"].lower()
 
 
-def test_workflows_pin_supported_action_majors_and_define_timeouts() -> None:
+def test_workflows_pin_every_third_party_action_to_full_sha() -> None:
     for relative in (
         ".github/workflows/checks.yml",
         ".github/workflows/reusable-deploy.yml",
         ".github/examples/application-deploy.yml",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
-        assert "actions/checkout@v4" not in text
-        assert "actions/setup-python@v5" not in text
+        third_party_lines = [
+            line
+            for line in text.splitlines()
+            if re.search(r"uses:\s+(?:actions|docker)/[^@\s]+@", line)
+        ]
+        assert third_party_lines
+        for line in third_party_lines:
+            assert re.search(r"@[0-9a-f]{40}\s+#\s+v\d", line), line
+        assert re.search(r"(?:actions|docker)/[^@\s]+@v\d", text) is None
         workflow = _workflow(ROOT / relative)
         for job in workflow["jobs"].values():
             if "uses" not in job:

@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import glob
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -382,29 +383,28 @@ def _backup_lock(config: dict[str, Any]) -> Iterator[None]:
     with lock_path.open("a+b") as stream:
         try:
             if os.name == "nt":
-                import msvcrt
+                lock_api: Any = importlib.import_module("msvcrt")
 
                 stream.seek(0)
                 stream.write(b"\0")
                 stream.flush()
                 stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                lock_api.locking(stream.fileno(), lock_api.LK_NBLCK, 1)
             else:
-                import fcntl
-
-                fcntl.flock(  # type: ignore[attr-defined]
-                    stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB  # type: ignore[attr-defined]
-                )
+                lock_api = importlib.import_module("fcntl")
+                lock_api.flock(stream.fileno(), lock_api.LOCK_EX | lock_api.LOCK_NB)
         except (BlockingIOError, OSError) as exc:
             raise BackupFailure("another backup operation is already running") from exc
         try:
             yield
         finally:
             if os.name == "nt":
+                lock_api = importlib.import_module("msvcrt")
                 stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                lock_api.locking(stream.fileno(), lock_api.LK_UNLCK, 1)
             else:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+                lock_api = importlib.import_module("fcntl")
+                lock_api.flock(stream.fileno(), lock_api.LOCK_UN)
 
 
 def backup(config: dict[str, Any]) -> dict[str, Any]:

@@ -194,9 +194,9 @@
               ansible.builtin.include_role:
                 name: compose_diagnostics
               vars:
-                compose_diagnostic_dir: "{{ release_recovery_diagnostic_dir }}"
-                compose_diagnostic_project: "{{ app_compose_project }}"
-                compose_diagnostic_user: "{{ deploy_user }}"
+                compose_diagnostics_dir: "{{ release_recovery_diagnostic_dir }}"
+                compose_diagnostics_project: "{{ app_compose_project }}"
+                compose_diagnostics_user: "{{ deploy_user }}"
           rescue:
             - name: Report unavailable release recovery diagnostics
               ansible.builtin.debug:

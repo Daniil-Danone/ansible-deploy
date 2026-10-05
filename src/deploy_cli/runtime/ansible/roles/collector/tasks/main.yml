@@ -102,8 +102,8 @@
           ansible.builtin.include_role:
             name: compose_diagnostics
           vars:
-            compose_diagnostic_dir: "{{ collector_dir }}"
-            compose_diagnostic_project: "ansible_deploy_collector_{{ app_environment }}"
+            compose_diagnostics_dir: "{{ collector_dir }}"
+            compose_diagnostics_project: "ansible_deploy_collector_{{ app_environment }}"
       rescue:
         - name: Report unavailable collector diagnostics
           ansible.builtin.debug:

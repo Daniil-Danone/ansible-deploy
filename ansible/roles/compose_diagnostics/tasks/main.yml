@@ -5,17 +5,17 @@
       - docker
       - compose
       - --project-directory
-      - "{{ compose_diagnostic_dir }}"
+      - "{{ compose_diagnostics_dir }}"
       - -f
-      - "{{ compose_diagnostic_dir }}/compose.yml"
+      - "{{ compose_diagnostics_dir }}/compose.yml"
       - -p
-      - "{{ compose_diagnostic_project }}"
+      - "{{ compose_diagnostics_project }}"
       - ps
       - --all
       - --format
       - json
-  become: "{{ compose_diagnostic_user | default('') | length > 0 }}"
-  become_user: "{{ compose_diagnostic_user | default(omit) }}"
+  become: "{{ compose_diagnostics_user | default('') | length > 0 }}"
+  become_user: "{{ compose_diagnostics_user | default(omit) }}"
   changed_when: false
   failed_when: false
   register: compose_diagnostic_ps
@@ -26,19 +26,19 @@
       - docker
       - compose
       - --project-directory
-      - "{{ compose_diagnostic_dir }}"
+      - "{{ compose_diagnostics_dir }}"
       - -f
-      - "{{ compose_diagnostic_dir }}/compose.yml"
+      - "{{ compose_diagnostics_dir }}/compose.yml"
       - -p
-      - "{{ compose_diagnostic_project }}"
+      - "{{ compose_diagnostics_project }}"
       - ps
       - --all
       - --services
       - --filter
       - "status={{ item }}"
   loop: [exited, dead, restarting]
-  become: "{{ compose_diagnostic_user | default('') | length > 0 }}"
-  become_user: "{{ compose_diagnostic_user | default(omit) }}"
+  become: "{{ compose_diagnostics_user | default('') | length > 0 }}"
+  become_user: "{{ compose_diagnostics_user | default(omit) }}"
   changed_when: false
   failed_when: false
   register: compose_diagnostic_failed_queries
@@ -49,13 +49,13 @@
       - docker
       - ps
       - --filter
-      - "label=com.docker.compose.project={{ compose_diagnostic_project }}"
+      - "label=com.docker.compose.project={{ compose_diagnostics_project }}"
       - --filter
       - health=unhealthy
       - --format
       - "{{ '{{.Label \"com.docker.compose.service\"}}' }}"
-  become: "{{ compose_diagnostic_user | default('') | length > 0 }}"
-  become_user: "{{ compose_diagnostic_user | default(omit) }}"
+  become: "{{ compose_diagnostics_user | default('') | length > 0 }}"
+  become_user: "{{ compose_diagnostics_user | default(omit) }}"
   changed_when: false
   failed_when: false
   register: compose_diagnostic_unhealthy_query
@@ -70,12 +70,12 @@
 - name: Collect bounded Compose logs for failed services
   ansible.builtin.command:
     argv: >-
-      {{ ['docker', 'compose', '--project-directory', compose_diagnostic_dir,
-      '-f', compose_diagnostic_dir + '/compose.yml', '-p', compose_diagnostic_project,
+      {{ ['docker', 'compose', '--project-directory', compose_diagnostics_dir,
+      '-f', compose_diagnostics_dir + '/compose.yml', '-p', compose_diagnostics_project,
       'logs', '--no-color', '--tail', '100'] +
       (compose_diagnostic_services if compose_diagnostic_services | length > 0 else []) }}
-  become: "{{ compose_diagnostic_user | default('') | length > 0 }}"
-  become_user: "{{ compose_diagnostic_user | default(omit) }}"
+  become: "{{ compose_diagnostics_user | default('') | length > 0 }}"
+  become_user: "{{ compose_diagnostics_user | default(omit) }}"
   changed_when: false
   failed_when: false
   register: compose_diagnostic_logs

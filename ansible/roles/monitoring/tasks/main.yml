@@ -224,8 +224,8 @@
           ansible.builtin.include_role:
             name: compose_diagnostics
           vars:
-            compose_diagnostic_dir: "{{ monitoring_dir }}"
-            compose_diagnostic_project: ansible_deploy_monitoring
+            compose_diagnostics_dir: "{{ monitoring_dir }}"
+            compose_diagnostics_project: ansible_deploy_monitoring
       rescue:
         - name: Report unavailable monitoring diagnostics
           ansible.builtin.debug:

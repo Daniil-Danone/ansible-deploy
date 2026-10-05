@@ -1175,6 +1175,7 @@ def test_unsafe_secret_permissions_error_explains_cause_without_names(
     sensitive_name = "private/DO-NOT-DISCLOSE-acl"
     _set_sensitive_name(project, "application.env_file", sensitive_name)
     candidate = root / sensitive_name
+    _secure_directory(root)
     _secure_directory(candidate.parent)
     candidate.write_text("APP_ENV=stage\n", encoding="utf-8")
     secure_secret_permissions(candidate)

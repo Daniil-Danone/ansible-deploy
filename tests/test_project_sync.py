@@ -1,7 +1,5 @@
 import hashlib
-import os
 import subprocess
-import sys
 from pathlib import Path
 
 import yaml
@@ -175,31 +173,10 @@ def test_state_records_version_and_installed_hashes(tmp_path: Path) -> None:
         assert hashlib.sha256((tmp_path / relative).read_bytes()).hexdigest() == digest
 
 
-def test_wheel_contains_scaffold_and_init_works_outside_checkout(tmp_path: Path) -> None:
-    source = Path(__file__).parents[1]
-    wheel_dir = tmp_path / "wheel"
-    subprocess.run(  # noqa: S603 - fixed interpreter and local source path
-        [sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", str(wheel_dir), str(source)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    venv = tmp_path / "venv"
-    subprocess.run(  # noqa: S603 - fixed interpreter and argument vector
-        [sys.executable, "-m", "venv", "--system-site-packages", str(venv)],
-        check=True,
-        timeout=60,
-    )
-    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    wheel = next(wheel_dir.glob("*.whl"))
-    subprocess.run(  # noqa: S603 - isolated venv executable and local wheel
-        [str(python), "-m", "pip", "install", "--no-deps", str(wheel)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+def test_wheel_contains_scaffold_and_init_works_outside_checkout(
+    tmp_path: Path, installed_wheel_python: Path
+) -> None:
+    python = installed_wheel_python
     application = tmp_path / "application"
     application.mkdir()
 

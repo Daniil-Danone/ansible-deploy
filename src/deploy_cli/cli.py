@@ -8,6 +8,7 @@ import sys
 import warnings
 from pathlib import Path
 
+from . import workstation
 from .config import (
     ConfigurationError,
     load_configuration,
@@ -188,6 +189,7 @@ def _parser() -> argparse.ArgumentParser:
         help="prompt securely when preparing a pristine Restore VPS",
     )
     restore.add_argument("--yes", action="store_true")
+    workstation.register(sub)
     return parser
 
 
@@ -323,6 +325,8 @@ def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     project_dir = args.project_dir.resolve()
     try:
+        if args.command in workstation.COMMANDS:
+            return workstation.run_command(args, project_dir)
         if args.command == "project":
             result = sync_project(
                 project_dir,

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Literal
 
 from .secret_file import (
     SecretFileError,
@@ -16,6 +16,7 @@ from .secret_file import (
     validate_secret_permissions,
     windows_current_sid,
 )
+from .user_config import UserConfigError, absolute_path_setting, load_user_config, user_config_path
 
 PROJECT_ID_RELATIVE_PATH = Path(".deploy/project-id")
 EXTERNAL_STORE_ENV = "ANSIBLE_DEPLOY_SECRETS_DIR"
@@ -451,6 +452,34 @@ def validate_external_file_for_use(
     _validate_external_ancestry(root, relative, secret=secret, require_file=True)
 
 
+def _create_owner_only_directory(path: Path) -> None:
+    created = False
+    try:
+        # Python gives mode=0700 special ACL semantics on modern Windows;
+        # inherit the already-private parent first, then install our one-ACE DACL.
+        path.mkdir(mode=0o777 if os.name == "nt" else 0o700)
+        created = True
+    except FileExistsError:
+        # Another process may have created the same protected path after exists().
+        # Callers revalidate its type, owner and permissions afterwards.
+        pass
+    except (OSError, SecretFileError):
+        raise SecretStoreError("Unable to create protected external directory") from None
+    if created:
+        try:
+            secure_secret_permissions(path)
+        except (OSError, SecretFileError):
+            raise SecretStoreError("Unable to create protected external directory") from None
+
+
+def _create_owner_only_directories(base: Path, parts: tuple[str, ...]) -> None:
+    current = base
+    for part in parts:
+        current /= part
+        if not current.exists():
+            _create_owner_only_directory(current)
+
+
 def ensure_external_parent_for_write(
     project_dir: Path,
     root: Path,
@@ -474,30 +503,7 @@ def ensure_external_parent_for_write(
         root_parts = root.relative_to(trusted_base).parts
     except ValueError:
         raise SecretStoreError("External secret root escapes its trusted base") from None
-    current = trusted_base
-    for part in (*root_parts, *relative_parent.parts):
-        current /= part
-        if current.exists():
-            continue
-        created = False
-        try:
-            # Python gives mode=0700 special ACL semantics on modern Windows;
-            # inherit the already-private parent first, then install our one-ACE DACL.
-            current.mkdir(mode=0o777 if os.name == "nt" else 0o700)
-            created = True
-        except FileExistsError:
-            # Another process may have created the same protected path after exists().
-            # The ancestry validation below verifies its type, owner and permissions.
-            pass
-        except (OSError, SecretFileError):
-            raise SecretStoreError("Unable to create protected external directory") from None
-        if created:
-            try:
-                secure_secret_permissions(current)
-            except (OSError, SecretFileError):
-                raise SecretStoreError(
-                    "Unable to create protected external directory"
-                ) from None
+    _create_owner_only_directories(trusted_base, (*root_parts, *relative_parent.parts))
 
     validate_external_root_ancestry(location, require_root=True)
     parent_location = ExternalSecretLocation(path.parent, root, True)
@@ -899,27 +905,72 @@ def create_project_id(project_dir: Path) -> uuid.UUID:
     return _posix_create_project_id(project)
 
 
-def external_secret_location(
-    project_dir: Path,
+@dataclass(frozen=True)
+class SecretStoreSettings:
+    """Machine-level secret store and where its location came from.
+
+    For ``env`` the path is the exact root of one project (historical CI contract);
+    for ``config`` and ``default`` it holds one ``<project-id>`` directory per project.
+    """
+
+    path: Path
+    trusted_base: Path
+    validate_trusted_base: bool
+    source: Literal["env", "config", "default"]
+
+    @property
+    def location(self) -> ExternalSecretLocation:
+        if self.source == "env":
+            return ExternalSecretLocation(self.path, self.path.parent, True)
+        return ExternalSecretLocation(self.path, self.trusted_base, self.validate_trusted_base)
+
+    def project_location(self, project_id: uuid.UUID) -> ExternalSecretLocation:
+        if self.source == "env":
+            return self.location
+        root = Path(os.path.abspath(self.path / str(project_id)))
+        return ExternalSecretLocation(root, self.trusted_base, self.validate_trusted_base)
+
+
+def secret_store_settings(
     *,
     environ: Mapping[str, str] | None = None,
     platform: str | None = None,
     home: Path | None = None,
-) -> ExternalSecretLocation:
-    project_id = load_project_id(project_dir)
+) -> SecretStoreSettings:
+    """Resolve the store with precedence env > user config > OS default."""
     environment = os.environ if environ is None else environ
     override = environment.get(EXTERNAL_STORE_ENV)
     if override is not None:
-        if not override:
-            raise SecretStoreError(f"{EXTERNAL_STORE_ENV} must not be empty")
-        override_path = Path(override).expanduser()
-        if not override_path.is_absolute():
-            raise SecretStoreError(f"{EXTERNAL_STORE_ENV} must be an absolute path")
-        # Keep the lexical root so handle-based validation can still observe a
-        # symlink/junction at the root itself instead of resolving it away.
-        root = Path(os.path.abspath(override_path))
-        return ExternalSecretLocation(root, root.parent, True)
+        try:
+            root = absolute_path_setting(override, name=EXTERNAL_STORE_ENV)
+        except UserConfigError as exc:
+            raise SecretStoreError(str(exc)) from None
+        return SecretStoreSettings(root, root.parent, True, "env")
 
+    try:
+        user_config = load_user_config(
+            user_config_path(environ=environment, platform=platform, home=home)
+        )
+    except UserConfigError as exc:
+        raise SecretStoreError(str(exc)) from None
+    if user_config.secrets_dir is not None:
+        return configured_secret_store_settings(user_config.secrets_dir)
+    return default_secret_store_settings(environ=environment, platform=platform, home=home)
+
+
+def configured_secret_store_settings(secrets_dir: Path) -> SecretStoreSettings:
+    # The store itself must be owner-only on every OS; its parent is an ordinary
+    # user-chosen directory, like the OS default bases.
+    return SecretStoreSettings(secrets_dir, secrets_dir.parent, False, "config")
+
+
+def default_secret_store_settings(
+    *,
+    environ: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> SecretStoreSettings:
+    environment = os.environ if environ is None else environ
     current_platform = sys.platform if platform is None else platform
     user_home = Path.home() if home is None else home
     if current_platform == "win32":
@@ -949,8 +1000,37 @@ def external_secret_location(
             validate_trusted_base = False
     lexical_base = Path(os.path.abspath(base))
     trusted_base = Path(os.path.abspath(trusted_base))
-    root = Path(os.path.abspath(lexical_base / "ansible-deploy/projects" / str(project_id)))
-    return ExternalSecretLocation(root, trusted_base, validate_trusted_base)
+    store = Path(os.path.abspath(lexical_base / "ansible-deploy/projects"))
+    return SecretStoreSettings(store, trusted_base, validate_trusted_base, "default")
+
+
+def ensure_secret_store(settings: SecretStoreSettings) -> None:
+    """Create the machine-level store owner-only and verify the whole chain afterwards."""
+    location = settings.location
+    if settings.source == "config":
+        # Ancestors above a user-chosen store are ordinary user directories.
+        try:
+            location.trusted_base.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            raise SecretStoreError("Unable to create external secret store parent") from None
+    try:
+        parts = location.root.relative_to(location.trusted_base).parts
+    except ValueError:
+        raise SecretStoreError("External secret root escapes its trusted base") from None
+    _create_owner_only_directories(location.trusted_base, parts)
+    validate_external_root_ancestry(location, require_root=True)
+
+
+def external_secret_location(
+    project_dir: Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    home: Path | None = None,
+) -> ExternalSecretLocation:
+    project_id = load_project_id(project_dir)
+    settings = secret_store_settings(environ=environ, platform=platform, home=home)
+    return settings.project_location(project_id)
 
 
 def external_secret_root(

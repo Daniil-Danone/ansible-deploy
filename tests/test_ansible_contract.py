@@ -291,3 +291,63 @@ def test_restore_application_preflights_compose_and_preserves_original_failure()
     assert "restore_preparation_failure" in tasks
     assert "Secondary Restore diagnostics failed" in tasks
     assert "wait: false" in tasks
+
+
+def _extra_env_delivery(path: str) -> dict[str, object]:
+    tasks = _yaml(path)
+    return next(task for task in tasks if "extra environments securely" in str(task.get("name")))
+
+
+def test_extra_env_files_are_delivered_like_primary_env_without_logging() -> None:
+    release = _extra_env_delivery("ansible/roles/application/tasks/main.yml")
+    restore = _extra_env_delivery("ansible/roles/restore_application/tasks/main.yml")
+
+    for task, base in (
+        (release, "{{ app_dir }}/releases/{{ deployment_version }}/"),
+        (restore, "{{ app_dir }}/current/"),
+    ):
+        copy = task["ansible.builtin.copy"]
+        assert task["no_log"] is True
+        assert task["loop"] == "{{ app_extra_env_files | default([]) }}"
+        assert copy == {  # type: ignore[comparison-overlap]
+            "src": "{{ item.src }}",
+            "dest": base + "{{ item.dest }}",
+            "owner": "{{ deploy_user }}",
+            "group": "{{ deploy_user }}",
+            "mode": "0600",
+        }
+    # Immutable release: extras are written once, together with .env and before metadata.
+    assert release["when"] == "not release_metadata_file.stat.exists"
+    names = [str(task.get("name")) for task in _yaml("ansible/roles/application/tasks/main.yml")]
+    assert names.index("Deliver immutable release environment securely") < names.index(
+        "Deliver immutable release extra environments securely"
+    ) < names.index("Write immutable release metadata last")
+
+
+def test_rollback_and_recovery_reuse_extra_env_files_from_the_release_directory() -> None:
+    # Extras live inside releases/<version>/ next to compose.yml and .env, so rollback,
+    # abort and release_restore switch them together with the release symlink.
+    for path in ("ansible/playbooks/rollback.yml", "ansible/playbooks/abort_release.yml"):
+        text = _text(path)
+        assert "app_extra_env_files" not in text
+        assert "project_src:" in text
+    assert "app_extra_env_files" not in _text("ansible/roles/release_restore/tasks/main.yml")
+
+
+def test_restore_removes_undeclared_extra_env_files_before_delivery() -> None:
+    tasks = _yaml("ansible/roles/restore_application/tasks/main.yml")
+    names = [str(task.get("name")) for task in tasks]
+    find = tasks[names.index("Find Restore extra environments from earlier restores")]
+    remove = tasks[names.index("Remove undeclared Restore extra environments")]
+
+    assert find["ansible.builtin.find"] == {  # type: ignore[comparison-overlap]
+        "paths": "{{ app_dir }}/current",
+        "patterns": ["*.env"],
+        "file_type": "file",
+        "hidden": False,
+    }
+    assert remove["ansible.builtin.file"]["state"] == "absent"  # type: ignore[index]
+    assert "map(attribute='dest')" in str(remove["when"])
+    assert names.index("Deliver Restore environment securely") < names.index(
+        "Remove undeclared Restore extra environments"
+    ) < names.index("Deliver Restore extra environments securely")

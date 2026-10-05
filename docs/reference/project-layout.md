@@ -34,6 +34,16 @@ namespace. Пример логической структуры root:
 └── backup/{rclone.conf,age.key}
 ```
 
+Например, для Stage:
+
+```text
+<external-root>/environments/stage/
+├── app.env                # application.env_file
+├── bot.env                # application.extra_env_files[].source (optional)
+├── registry-auth.json
+└── collector.password
+```
+
 `.deploy-state/` — локальное несекретное execution state/history, оно не коммитится.
 Упакованный Ansible runtime принадлежит установленному CLI, а не копируется в каждое
 application repository.

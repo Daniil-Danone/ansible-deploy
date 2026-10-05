@@ -187,7 +187,11 @@ def test_secret_materializer_writes_only_named_files_with_restrictive_modes(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "external store"
-    payload = {"environments/stage/app.env": base64.b64encode(b"APP_ENV=stage\n").decode()}
+    # Extra env files are just more store-relative entries in the same JSON map.
+    payload = {
+        "environments/stage/app.env": base64.b64encode(b"APP_ENV=stage\n").decode(),
+        "environments/stage/bot.env": base64.b64encode(b"DB_PASSWORD=bot\n").decode(),
+    }
     environment = os.environ.copy()
     environment["ANSIBLE_DEPLOY_SECRETS_DIR"] = str(root)
     environment["DEPLOY_SECRET_STORE_JSON"] = json.dumps(payload)
@@ -200,10 +204,12 @@ def test_secret_materializer_writes_only_named_files_with_restrictive_modes(
         text=True,
     )
 
-    secret = root / "environments/stage/app.env"
-    assert secret.read_bytes() == b"APP_ENV=stage\n"
-    if os.name != "nt":
-        assert secret.stat().st_mode & 0o777 == 0o600
+    expected = {"app.env": b"APP_ENV=stage\n", "bot.env": b"DB_PASSWORD=bot\n"}
+    for name, content in expected.items():
+        secret = root / "environments/stage" / name
+        assert secret.read_bytes() == content
+        if os.name != "nt":
+            assert secret.stat().st_mode & 0o777 == 0o600
 
 
 def test_secret_materializer_rejects_path_traversal(tmp_path: Path) -> None:

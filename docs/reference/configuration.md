@@ -65,6 +65,48 @@ health_path: /health
 `registry_auth_file`, а также server key names резолвятся относительно внешнего root.
 Production обязан иметь отдельные paths/remote_dir и digest-pinned images.
 
+### Дополнительные secret env files
+
+Если несколько services читают одинаковые имена переменных с разными значениями
+(например, bot и backend оба ждут `DB_PASSWORD`), объявите дополнительные внешние env
+files в Stage, Production или Restore:
+
+```yaml
+application:
+  env_file: environments/stage/app.env
+  extra_env_files:
+    - source: environments/stage/bot.env   # путь во внешнем store
+      target: bot.env                      # имя файла рядом с compose.yml на сервере
+```
+
+- `source` подчиняется тем же правилам, что `env_file`: нормализованный относительный
+  путь внутри внешнего store, regular owner-only file без hardlinks. Отсутствие или
+  небезопасные права файла останавливают deploy на preflight; путь не попадает в ошибки.
+- `target` — простое имя файла по шаблону `^[A-Za-z0-9][A-Za-z0-9._-]*\.env$`
+  (до 68 символов): без каталогов и `..`, не `.env`.
+- `source` и `target` уникальны; `source` не может совпадать с `env_file`, ключами,
+  registry/collector/backup secrets или файлами конфигурации. Production не может
+  использовать env files Stage.
+- `required_env_vars` и проверка `APP_ENV` применяются только к основному `env_file`;
+  extra files проверяются как читаемые UTF-8 dotenv.
+- значения из extra files маскируются в выводе так же, как значения `.env`, и входят в
+  checksum release: изменение extra file требует новой версии deploy.
+
+Service подключает файл через Compose `env_file`:
+
+```yaml
+services:
+  bot:
+    image: registry.example.com/bot@sha256:...
+    env_file: [bot.env]
+```
+
+На сервере extra files доставляются в `releases/<version>/` рядом с `.env` с теми же
+owner, mode `0600` и `no_log`. Rollback и восстановление прерванного release
+переключают их вместе с release directory. Release directories неизменяемы, поэтому
+устаревшие targets старых версий остаются только в своих releases; Restore использует
+постоянный `current/` и перед доставкой удаляет из него не объявленные `*.env`.
+
 Optional `collector` содержит HTTPS Loki push URL, username и внешний
 `password_file`; его remote directory не пересекается с application directory.
 
@@ -123,6 +165,9 @@ Production `backup` задаёт schedule, remote, external `credentials_file`, 
 - `APP_ENV` во внешнем env совпадает с environment.
 - secret-like ключи и значения в Compose `environment` запрещены; credentials должны
   находиться во внешнем `application.env_file`, указанном только относительным именем.
+- service `env_file` (строка, список или длинная форма `- path: x` с optional boolean
+  `required`) может ссылаться только на `.env` или объявленный
+  `application.extra_env_files[].target`; другие пути отклоняются.
 
 Неизвестные поля запрещены строгими Pydantic models. Ошибка конфигурации возвращает
 код `2` и не должна включать secret value.

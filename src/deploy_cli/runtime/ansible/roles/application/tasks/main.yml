@@ -69,6 +69,17 @@
   no_log: true
   when: not release_metadata_file.stat.exists
 
+- name: Deliver immutable release extra environments securely
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ app_dir }}/releases/{{ deployment_version }}/{{ item.dest }}"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  loop: "{{ app_extra_env_files | default([]) }}"
+  no_log: true
+  when: not release_metadata_file.stat.exists
+
 - name: Write immutable release metadata last
   ansible.builtin.copy:
     dest: "{{ app_dir }}/releases/{{ deployment_version }}/deployment.json"

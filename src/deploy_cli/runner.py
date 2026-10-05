@@ -16,7 +16,7 @@ from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path, PurePosixPath
 
-from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
+from .models import EnvironmentConfig, ExtraEnvFile, GlobalConfig, MonitoringConfig
 from .redaction import Redactor
 from .secret_store import SecretStoreError, validate_external_file_for_use
 
@@ -31,6 +31,11 @@ class RunnerError(RuntimeError):
     def __init__(self, message: str, exit_code: int) -> None:
         super().__init__(message)
         self.exit_code = exit_code
+
+
+def extra_env_mount(target: str) -> str:
+    """Container path of an extra env file; ``target`` is a validated plain file name."""
+    return f"/run/secrets/app_extra_env/{target}"
 
 
 def _before_subprocess_launch() -> None:
@@ -182,6 +187,7 @@ class AnsibleRunner:
         *,
         compose_file: Path | None = None,
         env_file: Path | None = None,
+        extra_env_files: Sequence[ExtraEnvFile] = (),
         registry_auth_file: Path | None = None,
         observability_secret_file: Path | None = None,
         backup_credentials_file: Path | None = None,
@@ -195,6 +201,10 @@ class AnsibleRunner:
             external_mounts = [
                 ("SSH private key", ssh_key, True),
                 ("application environment", env_file, True),
+                *(
+                    (f"application extra environment {extra.target}", extra.source, True)
+                    for extra in extra_env_files
+                ),
                 ("registry authentication", registry_auth_file, True),
                 ("observability secret", observability_secret_file, True),
                 ("backup credentials", backup_credentials_file, True),
@@ -243,6 +253,8 @@ class AnsibleRunner:
             args[3:3] = ["-v", f"{compose_file}:/run/config/compose.yml:ro"]
         if env_file is not None:
             args[3:3] = ["-v", f"{env_file}:/run/secrets/app_env:ro"]
+        for extra in extra_env_files:
+            args[3:3] = ["-v", f"{extra.source}:{extra_env_mount(extra.target)}:ro"]
         if registry_auth_file is not None:
             args[3:3] = ["-v", f"{registry_auth_file}:/run/secrets/registry_auth:ro"]
         if observability_secret_file is not None:
@@ -602,6 +614,10 @@ def ansible_vars(
             {
                 "app_compose_file": "/run/config/compose.yml",
                 "app_env_file": "/run/secrets/app_env",
+                "app_extra_env_files": [
+                    {"src": extra_env_mount(extra.target), "dest": extra.target}
+                    for extra in config.application.extra_env_files
+                ],
                 "app_registry_auth_file": (
                     "/run/secrets/registry_auth"
                     if config.application.registry_auth_file is not None

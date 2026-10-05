@@ -34,6 +34,38 @@ jobs:
       - run: docker build -t ansible-deploy:ci src/deploy_cli/runtime
       - run: docker tag ansible-deploy:ci ansible-deploy:local && make integration-test
 
+  version-bump:
+    # Every change ships as a release, so the package version must move.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require a higher package version than the base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          read_version() {
+            grep '^__version__' "$1" | cut -d'"' -f2
+          }
+          git fetch --depth=1 origin "$BASE_REF"
+          git show "FETCH_HEAD:src/deploy_cli/__init__.py" > /tmp/base_init.py
+          base="$(read_version /tmp/base_init.py)"
+          head="$(read_version src/deploy_cli/__init__.py)"
+          echo "base=$base head=$head"
+          if [ "$base" = "$head" ]; then
+            echo "::error::Package version is still $head; raise deploy_cli.__version__"
+            exit 1
+          fi
+          higher="$( { echo "$base"; echo "$head"; } | sort -V | tail -n1 )"
+          if [ "$higher" != "$head" ]; then
+            echo "::error::Version $head is lower than $base on $BASE_REF"
+            exit 1
+          fi
+
   target-os:
     name: target-os (Ubuntu ${{ matrix.ubuntu }})
     runs-on: ubuntu-24.04

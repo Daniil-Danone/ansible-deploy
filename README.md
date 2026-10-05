@@ -80,6 +80,26 @@ Live VPS/DNS/Google Drive acceptance требует реальные досту�
 - [CI/CD](docs/guides/ci-cd.md) · [backup/restore/DR](docs/guides/backup-restore.md)
 - [Безопасность](docs/security.md) · [диагностика](docs/troubleshooting.md)
 
+## Версионирование и релиз
+
+Любое изменение поднимает версию пакета в `src/deploy_cli/__init__.py`:
+каждая правка доезжает до пользователей отдельным релизом, а не копится в
+`develop`. Проверка `version-bump` в CI отклоняет pull request, если версия
+совпадает с версией базовой ветки или ниже её.
+
+Версия по semver: исправление — patch, новая команда или флаг — minor,
+несовместимое изменение конфигурации или политики — major.
+
+Релиз: `develop` вливается в `main`, затем на `main` ставится тег `vX.Y.Z`,
+совпадающий с `__version__`. Тег запускает workflow `release`, который сверяет
+тег с версией пакета, прогоняет тесты, собирает wheel и публикует GitHub
+Release. Тег, не совпадающий с версией, падает на первом же шаге.
+
+```bash
+git switch main && git merge --ff-only develop && git push
+git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
+```
+
 ## Проверка разработки CLI
 
 ```bash

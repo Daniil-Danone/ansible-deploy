@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from .secret_file import (
     SecretFileError,
+    SecretPermissionError,
     secure_secret_permissions,
     validate_secret_permissions,
     windows_current_sid,
@@ -24,10 +25,42 @@ _IDENTITY_NAME = "project-id"
 _MAX_IDENTITY_SIZE = 38
 _O_DIRECTORY = int(getattr(os, "O_DIRECTORY", 0))
 _O_NOFOLLOW = int(getattr(os, "O_NOFOLLOW", 0))
+_MISSING_FILE = "File or one of its directories is missing in the secret store"
 
 
 class SecretStoreError(ValueError):
     """Raised when project identity or secret-store location is unsafe."""
+
+
+class SecretStorePathError(SecretStoreError):
+    """A secret-store path failed a safety check.
+
+    The message is fixed text that names the kind of path (never configured names,
+    absolute paths or values), so callers may show it to the user as the reason.
+    """
+
+
+def _component_label(*, directory: bool, secret: bool) -> str:
+    if directory:
+        return "secret store directory"
+    return "secret file" if secret else "external public file"
+
+
+def _owner_only_hint(*, directory: bool) -> str:
+    if os.name == "nt":
+        grant = "(OI)(CI)F" if directory else "F"
+        return (
+            f'fix: icacls <path> /inheritance:r /grant:r "%USERNAME%:{grant}" '
+            "(PowerShell: $env:USERNAME), then /remove any other account it lists"
+        )
+    return f"fix: chmod {'700' if directory else '600'} <path>"
+
+
+def _not_owner_only(*, directory: bool, secret: bool) -> SecretStorePathError:
+    label = _component_label(directory=directory, secret=secret)
+    return SecretStorePathError(
+        f"{label.capitalize()} is not owner-only; {_owner_only_hint(directory=directory)}"
+    )
 
 
 def _windows_library(name: str) -> Any:
@@ -105,24 +138,28 @@ def _validate_posix_metadata(
     secret: bool,
     owner_only_directory: bool = False,
 ) -> None:
+    label = _component_label(directory=directory, secret=secret)
     expected_type = stat.S_ISDIR if directory else stat.S_ISREG
     if not expected_type(metadata.st_mode):
-        raise SecretStoreError("External path component has an invalid file type")
+        kind = "a directory" if directory else "a regular file"
+        raise SecretStorePathError(f"{label.capitalize()} must be {kind}")
     if metadata.st_uid != _current_uid():
-        raise SecretStoreError("External path components must be owned by the current user")
+        raise SecretStorePathError(f"{label.capitalize()} must be owned by the current user")
     mode = stat.S_IMODE(metadata.st_mode)
     if directory:
-        forbidden = 0o077 if owner_only_directory else 0o022
-        if mode & forbidden:
-            requirement = "owner-only" if owner_only_directory else "not group/other writable"
-            raise SecretStoreError(f"External directories must be {requirement}")
+        if owner_only_directory and mode & 0o077:
+            raise _not_owner_only(directory=True, secret=False)
+        if mode & 0o022:
+            raise SecretStorePathError(
+                "Secret store trusted base must not be group/other writable"
+            )
     elif secret:
         if mode & 0o077:
-            raise SecretStoreError("External secret file permissions are not owner-only")
+            raise _not_owner_only(directory=False, secret=True)
         if metadata.st_nlink != 1:
-            raise SecretStoreError("External secret file must not have hardlink aliases")
+            raise SecretStorePathError("Secret file must not have hardlink aliases")
     elif mode & 0o022:
-        raise SecretStoreError("External public file must not be group/other writable")
+        raise SecretStorePathError("External public file must not be group/other writable")
 
 
 def _validate_posix_ancestry(
@@ -138,7 +175,7 @@ def _validate_posix_ancestry(
             root_descriptor = os.open(root, _posix_directory_flags())
         except FileNotFoundError:
             if require_file:
-                raise SecretStoreError("Required external file is missing") from None
+                raise SecretStorePathError(_MISSING_FILE) from None
             return
         descriptors.append(root_descriptor)
         _validate_posix_metadata(
@@ -155,10 +192,10 @@ def _validate_posix_ancestry(
                 descriptor = os.open(part, flags, dir_fd=parent)
             except FileNotFoundError:
                 if require_file:
-                    raise SecretStoreError("Required external file is missing") from None
+                    raise SecretStorePathError(_MISSING_FILE) from None
                 return
             except OSError:
-                raise SecretStoreError(
+                raise SecretStorePathError(
                     "External path contains an unsafe link or component"
                 ) from None
             descriptors.append(descriptor)
@@ -174,25 +211,39 @@ def _validate_posix_ancestry(
 
 
 def _validate_windows_component(path: Path, *, directory: bool, secret: bool) -> int:
+    label = _component_label(directory=directory, secret=secret)
     try:
         handle = _windows_open(path, directory=directory)
     except FileNotFoundError:
         raise
     except OSError:
-        raise SecretStoreError("Unable to open external path component safely") from None
+        raise SecretStorePathError(f"Unable to open {label} safely") from None
     try:
-        _windows_validate_handle(handle, directory=directory)
+        try:
+            _windows_validate_handle(handle, directory=directory)
+        except SecretStoreError:
+            kind = "a directory" if directory else "a regular file"
+            raise SecretStorePathError(
+                f"{label.capitalize()} must be {kind}, not a link or reparse point"
+            ) from None
         if _windows_owner_sid(handle) != windows_current_sid():
-            raise SecretStoreError("External path components must be owned by the current user")
+            raise SecretStorePathError(f"{label.capitalize()} must be owned by the current user")
         validate_secret_permissions(path)
         if not directory and secret:
             metadata = path.stat()
             if metadata.st_nlink != 1:
-                raise SecretStoreError("External secret file must not have hardlink aliases")
+                raise SecretStorePathError("Secret file must not have hardlink aliases")
         return handle
-    except (OSError, SecretFileError):
+    except SecretPermissionError:
         _windows_close(handle)
-        raise SecretStoreError("External path permissions are not owner-only") from None
+        raise _not_owner_only(directory=directory, secret=secret) from None
+    except SecretFileError as exc:
+        _windows_close(handle)
+        # SecretFileError texts are fixed and name-free (e.g. icacls/whoami failures).
+        raise SecretStorePathError(f"Unable to verify {label} permissions: {exc}") from None
+    except OSError:
+        _windows_close(handle)
+        raise SecretStorePathError(f"Unable to inspect {label}") from None
     except Exception:
         _windows_close(handle)
         raise
@@ -211,7 +262,7 @@ def _validate_windows_ancestry(
             handles.append(_validate_windows_component(root, directory=True, secret=False))
         except FileNotFoundError:
             if require_file:
-                raise SecretStoreError("Required external file is missing") from None
+                raise SecretStorePathError(_MISSING_FILE) from None
             return
         current = root
         for index, part in enumerate(relative.parts):
@@ -225,7 +276,7 @@ def _validate_windows_ancestry(
                 )
             except FileNotFoundError:
                 if require_file:
-                    raise SecretStoreError("Required external file is missing") from None
+                    raise SecretStorePathError(_MISSING_FILE) from None
                 return
     finally:
         _close_windows_security_handles(handles)
@@ -260,7 +311,7 @@ def _validate_posix_directory_chain(
         try:
             base_descriptor = os.open(base, _posix_directory_flags())
         except (FileNotFoundError, OSError):
-            raise SecretStoreError("External secret trusted base is unavailable") from None
+            raise SecretStorePathError("External secret trusted base is unavailable") from None
         descriptors.append(base_descriptor)
         if validate_base:
             _validate_posix_metadata(os.fstat(base_descriptor), directory=True, secret=False)
@@ -272,10 +323,10 @@ def _validate_posix_directory_chain(
                 )
             except FileNotFoundError:
                 if require_root:
-                    raise SecretStoreError("External secret root is missing") from None
+                    raise SecretStorePathError("External secret root is missing") from None
                 return
             except OSError:
-                raise SecretStoreError("External secret ancestry is unsafe") from None
+                raise SecretStorePathError("External secret ancestry is unsafe") from None
             descriptors.append(descriptor)
             _validate_posix_metadata(
                 os.fstat(descriptor),
@@ -315,7 +366,7 @@ def _validate_windows_directory_chain(
                 )
             except FileNotFoundError:
                 if require_root:
-                    raise SecretStoreError("External secret root is missing") from None
+                    raise SecretStorePathError("External secret root is missing") from None
                 return
     finally:
         _close_windows_security_handles(handles)

@@ -46,6 +46,27 @@ symlink/junction/cloud-sync alias. Значение секрета не нужн
 committed project-id сохранит namespace; `--new-project-id` намеренно создаёт пустой
 новый namespace и не копирует secrets.
 
+### `Invalid schema v2 <field>: ... is not owner-only`
+
+После двоеточия CLI печатает причину: что именно не прошло проверку (`Secret file`,
+`Secret store directory`, отсутствующий файл, link) — без имён и абсолютных путей, они
+считаются чувствительными. Какой файл имеется в виду, видно по полю (`application
+environment` → `application.env_file` в `.deploy/environments/<env>/config.yml`);
+корень store покажет `ansible-deploy secrets path`.
+
+Owner-only означает: на POSIX — `chmod 600` для файлов и `chmod 700` для директорий;
+на Windows — в ACL ровно одна запись, Full control текущего пользователя. Файлы и
+папки, созданные внутри store через Explorer, редактор или `New-Item`, наследуют такую
+запись (`icacls` показывает `(I)(F)` / `(I)(OI)(CI)(F)`) и принимаются. Ошибка значит,
+что в ACL есть лишние записи (другие пользователи, группы, deny) или наследование от
+непривата. Исправление на Windows (cmd; в PowerShell — `$env:USERNAME`):
+
+```bat
+icacls <file> /inheritance:r /grant:r "%USERNAME%:F"
+icacls <dir> /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F"
+icacls <path> /remove <другой-аккаунт>
+```
+
 ## Partial deploy
 
 Ansible tasks идемпотентны; исправьте первопричину и повторите command. Application

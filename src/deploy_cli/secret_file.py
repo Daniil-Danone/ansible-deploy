@@ -14,6 +14,10 @@ class SecretFileError(ValueError):
     """A secret file is not protected for the current platform."""
 
 
+class SecretPermissionError(SecretFileError):
+    """Permissions were inspected and they are not owner-only."""
+
+
 def _windows_library(name: str) -> Any:
     windows_ctypes: Any = ctypes
     return windows_ctypes.WinDLL(name, use_last_error=True)
@@ -100,7 +104,10 @@ def validate_secret_permissions(path: Path) -> None:
     if os.name != "nt":
         mode = stat.S_IMODE(path.stat().st_mode)
         if mode & 0o077:
-            raise SecretFileError("Registry authentication must have mode 0600")
+            expected_mode = "0700" if path.is_dir() else "0600"
+            raise SecretPermissionError(
+                f"Secret {_kind(path)} must be owner-only (mode {expected_mode})"
+            )
         return
     current_sid = windows_current_sid()
     icacls = _system_executable("icacls.exe")
@@ -123,10 +130,32 @@ def validate_secret_permissions(path: Path) -> None:
     finally:
         acl_path.unlink(missing_ok=True)
     dacl = descriptor_text.splitlines()[-1].strip()
-    ace_flags = "OICI" if path.is_dir() else ""
-    expected = rf"D:[A-Z]*\(A;{ace_flags};FA;;;{re.escape(current_sid)}\)"
-    if re.fullmatch(expected, dacl) is None:
-        raise SecretFileError("Registry authentication requires an owner-only Windows ACL")
+    if not is_owner_only_windows_dacl(dacl, current_sid, directory=path.is_dir()):
+        raise SecretPermissionError(
+            f"Secret {_kind(path)} must have an owner-only Windows ACL "
+            "(a single full-control entry for the current user)"
+        )
+
+
+def is_owner_only_windows_dacl(dacl: str, sid: str, *, directory: bool) -> bool:
+    """Accept exactly one Allow/FullAccess ACE for ``sid`` and nothing else.
+
+    The ACE may be explicit (what ``secure_secret_permissions`` installs) or inherited
+    (``ID`` flag: files and folders created by Explorer, editors or ``New-Item`` inside an
+    owner-only directory). Inheritance does not widen access: the DACL still has a single
+    entry, and every caller first validates each directory from the secret store down to
+    this path as owner-only (``secret_store._validate_windows_component``), so the parent
+    the entry was inherited from is itself owner-only. Above the store the trusted base is
+    not checked by design, but whoever controls it can replace the store directory anyway,
+    so an explicit ACE on the topmost directory would not protect more.
+    """
+    ace_flags = "OICI" if directory else ""
+    expected = rf"D:[A-Z]*\(A;{ace_flags}(?:ID)?;FA;;;{re.escape(sid)}\)"
+    return re.fullmatch(expected, dacl) is not None
+
+
+def _kind(path: Path) -> str:
+    return "directory" if path.is_dir() else "file"
 
 
 def windows_current_sid() -> str:

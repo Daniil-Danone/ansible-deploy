@@ -63,6 +63,19 @@ def _secure_directory(path: Path) -> None:
     secure_secret_permissions(path)
 
 
+def _grant_other_read(path: Path) -> None:
+    """Make a secret readable by others. An inherited owner-only ACL alone is accepted."""
+    if os.name != "nt":
+        path.chmod(0o644)
+        return
+    icacls = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/icacls.exe"
+    subprocess.run(  # noqa: S603 - fixed Windows ACL utility and arguments
+        [str(icacls), str(path), "/grant", "*S-1-5-32-545:(R)"],
+        capture_output=True,
+        check=True,
+    )
+
+
 def _write_external_file(config, path: Path, content: bytes) -> None:
     context = config.external_secret_context
     assert context is not None
@@ -209,8 +222,7 @@ def test_t8_external_secret_must_be_regular_owner_only_without_hardlinks(
     else:
         candidate.write_bytes(b"synthetic-test-value\n")
         if kind == "permissions":
-            if os.name != "nt":
-                candidate.chmod(0o644)
+            _grant_other_read(candidate)
         else:
             secure_secret_permissions(candidate)
             os.link(candidate, root / "checks/application-secret-alias")
@@ -246,8 +258,7 @@ def test_t9_validation_error_hides_sensitive_name_and_file_value(
     _secure_directory(root)
     _secure_directory(candidate.parent)
     candidate.write_text(sensitive_value, encoding="utf-8")
-    if os.name != "nt":
-        candidate.chmod(0o644)
+    _grant_other_read(candidate)
 
     with pytest.raises(ConfigurationError) as raised:
         load_configuration(project, "stage")
@@ -1113,8 +1124,7 @@ def test_extra_env_file_must_be_regular_owner_only_without_hardlinks(
     else:
         candidate.write_bytes(b"DB_PASSWORD=synthetic-bot-value\n")
         if kind == "permissions":
-            if os.name != "nt":
-                candidate.chmod(0o644)
+            _grant_other_read(candidate)
         else:
             secure_secret_permissions(candidate)
             os.link(candidate, root / "checks/bot-alias.env")
@@ -1156,3 +1166,71 @@ def test_extra_env_file_values_are_redacted_checksummed_and_mounted(
         extra_env_files=config.application.extra_env_files,
     )
     assert f"{extra.source}:/run/secrets/app_extra_env/bot.env:ro" in calls[0]
+
+
+def test_unsafe_secret_permissions_error_explains_cause_without_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, root = _v2_project(tmp_path, monkeypatch)
+    sensitive_name = "private/DO-NOT-DISCLOSE-acl"
+    _set_sensitive_name(project, "application.env_file", sensitive_name)
+    candidate = root / sensitive_name
+    _secure_directory(root)
+    _secure_directory(candidate.parent)
+    candidate.write_text("APP_ENV=stage\n", encoding="utf-8")
+    secure_secret_permissions(candidate)
+    _grant_other_read(candidate)
+
+    with pytest.raises(ConfigurationError) as raised:
+        load_configuration(project, "stage")
+
+    message = str(raised.value)
+    assert message.startswith(
+        "Invalid schema v2 application environment: Secret file is not owner-only; fix: "
+    )
+    assert ("icacls" if os.name == "nt" else "chmod 600") in message
+    assert "ansible-deploy secrets path" in message
+    assert "DO-NOT-DISCLOSE" not in message
+    assert str(tmp_path) not in message
+    assert raised.value.__cause__ is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL inheritance contract")
+def test_windows_secret_created_by_plain_tools_inside_store_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, root = _v2_project(tmp_path, monkeypatch)
+    _secure_directory(root)
+    _, initial = load_configuration(project, "stage")
+    # Like Explorer or an editor: no explicit ACL, everything inherits from the root.
+    env_file = initial.application.env_file
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text("APP_ENV=stage\n", encoding="utf-8")
+
+    _, config = load_configuration(project, "stage")
+
+    config_module.validate_external_input_for_use(
+        config, config.application.env_file, field="application environment"
+    )
+
+
+def test_missing_secret_at_use_time_explains_cause_without_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, root = _v2_project(tmp_path, monkeypatch)
+    _secure_directory(root)
+    sensitive_name = "private/DO-NOT-DISCLOSE-missing-reason"
+    _set_sensitive_name(project, "application.env_file", sensitive_name)
+    _, config = load_configuration(project, "stage")
+
+    with pytest.raises(ConfigurationError) as raised:
+        config_module.validate_external_input_for_use(
+            config, config.application.env_file, field="application environment"
+        )
+
+    message = str(raised.value)
+    assert message.startswith("Required application environment is unavailable for stage: ")
+    assert "missing in the secret store" in message
+    assert "ansible-deploy secrets path" in message
+    assert "DO-NOT-DISCLOSE" not in message
+    assert str(tmp_path) not in message

@@ -11,8 +11,9 @@
       - gnupg
       - locales
     state: present
+    # Always refresh: cloud images ship empty apt lists with a fresh mtime,
+    # so cache_valid_time would skip the update and find no packages.
     update_cache: true
-    cache_valid_time: 3600
 
 - name: Generate UTF-8 locale
   community.general.locale_gen:

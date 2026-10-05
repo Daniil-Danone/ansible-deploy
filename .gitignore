@@ -14,3 +14,4 @@ __pycache__/
 secrets/
 *registry-auth.json
 .deploy-state/
+dist/

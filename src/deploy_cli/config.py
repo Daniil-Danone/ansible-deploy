@@ -16,6 +16,7 @@ from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from .secret_file import SecretFileError, validate_secret_permissions
 from .secret_store import (
     SecretStoreError,
+    SecretStorePathError,
     external_secret_location,
     resolve_external_file,
     validate_external_file_for_use,
@@ -24,6 +25,20 @@ from .secret_store import (
 
 class ConfigurationError(ValueError):
     """Configuration is absent or invalid."""
+
+
+_STORE_LOCATION_HINT = "run `ansible-deploy secrets path` to locate the secret store"
+
+
+def _secret_store_reason(exc: Exception) -> str:
+    """Return the actionable store reason, or nothing for operational failures.
+
+    Only ``SecretStorePathError`` texts are shown: they are fixed and name-free, while
+    other low-level messages may carry configured names or absolute paths.
+    """
+    if isinstance(exc, SecretStorePathError):
+        return f": {exc}; {_STORE_LOCATION_HINT}"
+    return ""
 
 
 def _load_yaml[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
@@ -68,8 +83,10 @@ def _external_file_path(
 ) -> Path:
     try:
         return resolve_external_file(project_dir, configured, secret=secret)
-    except (SecretStoreError, OSError, ValueError):
-        raise ConfigurationError(f"Invalid schema v2 {field}") from None
+    except (SecretStoreError, OSError, ValueError) as exc:
+        raise ConfigurationError(
+            f"Invalid schema v2 {field}{_secret_store_reason(exc)}"
+        ) from None
 
 
 def _set_external_context(
@@ -83,9 +100,10 @@ def _set_external_context(
             location.trusted_base,
             location.validate_trusted_base,
         )
-    except SecretStoreError:
+    except SecretStoreError as exc:
         raise ConfigurationError(
             f"Invalid schema v2 secret store for {config.environment}"
+            f"{_secret_store_reason(exc)}"
         ) from None
 
 
@@ -111,10 +129,11 @@ def validate_external_input_for_use(
             trusted_base=trusted_base,
             validate_trusted_base=validate_trusted_base,
         )
-    except (SecretStoreError, OSError, ValueError):
+    except (SecretStoreError, OSError, ValueError) as exc:
         # Configured names and absolute external paths are sensitive metadata too.
         raise ConfigurationError(
             f"Required {field} is unavailable for {config.environment}"
+            f"{_secret_store_reason(exc)}"
         ) from None
 
 

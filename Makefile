@@ -32,7 +32,7 @@ integration-test:
 	docker tag ansible-deploy:local "$$(python -c 'from deploy_cli.runner import runtime_image_reference; print(runtime_image_reference())')"
 	python -m pytest docker_tests
 	set -e; for playbook in release_finalize release_restore legacy_snapshot identity_guard \
-		legacy_guards; do \
+		legacy_guards volume_continuity; do \
 		docker run --rm --entrypoint ansible-playbook \
 			-e ANSIBLE_ROLES_PATH=/workspace/$(RUNTIME)/ansible/roles \
 			-v "$(CURDIR):/workspace" -w /workspace ansible-deploy:local \

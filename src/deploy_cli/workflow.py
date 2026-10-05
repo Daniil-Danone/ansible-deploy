@@ -4,6 +4,7 @@ import json
 import socket
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -223,6 +224,7 @@ def deploy(
     dry_run: bool,
     deployment_version: str = "unmanaged",
     bootstrap_password: str | None = None,
+    allowed_volume_changes: Sequence[str] = (),
 ) -> None:
     checksum, images = deployment_manifest(config)
     variables = ansible_vars(
@@ -232,6 +234,8 @@ def deploy(
         deployment_checksum=checksum,
         deployment_images=images,
     )
+    # One-shot acknowledgement: deliberately not part of config or the release checksum.
+    variables["app_allowed_volume_changes"] = sorted(set(allowed_volume_changes))
     runner.build_image()
     runner.trust_host(
         config.server.host, config.server.ssh_port, config.server.host_key_fingerprints

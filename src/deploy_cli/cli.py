@@ -132,6 +132,14 @@ def _parser() -> argparse.ArgumentParser:
             help="prompt securely for the initial SSH password",
         )
         deploy_parser.add_argument("--version", help="Deployment version (defaults to Git SHA)")
+        deploy_parser.add_argument(
+            "--allow-volume-change",
+            action="append",
+            default=[],
+            metavar="NAME",
+            type=_volume_key,
+            help="acknowledge that Compose volume NAME is intentionally added or removed",
+        )
         if environment == "prod":
             deploy_parser.add_argument("--yes", action="store_true")
     status_parser = sub.add_parser("status", help="Check public environment health")
@@ -210,6 +218,12 @@ def _print_project_result(result: ProjectSyncResult) -> None:
         )
     if not result.changes_required:
         print("[OK] Project scaffold is up to date")
+
+
+def _volume_key(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise argparse.ArgumentTypeError(f"invalid Compose volume name: {value!r}")
+    return value
 
 
 def _deployment_version(repo: Path, supplied: str | None) -> str:
@@ -579,6 +593,7 @@ def run(argv: list[str] | None = None) -> int:
                     dry_run=args.dry_run,
                     deployment_version=version,
                     bootstrap_password=bootstrap_password,
+                    allowed_volume_changes=args.allow_volume_change,
                 )
                 print(f"[OK] {current_environment} deployment {version} completed")
             elif args.command == "rollback":

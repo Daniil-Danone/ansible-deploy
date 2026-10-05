@@ -1,0 +1,32 @@
+---
+- name: Reset evidence for {{ volume_case.name }}
+  ansible.builtin.set_fact:
+    volume_case_failed: false
+    volume_case_message: ""
+
+- name: Run volume continuity guard for {{ volume_case.name }}
+  block:
+    - name: Compare releases for {{ volume_case.name }}
+      ansible.builtin.include_role:
+        name: volume_continuity_guard
+      vars:
+        volume_continuity_guard_project: "{{ volume_case.project }}"
+        volume_continuity_guard_current_compose: "{{ continuity_fixture_root }}/current-compose.yml"
+        volume_continuity_guard_target_compose: "{{ volume_case.target }}"
+        volume_continuity_guard_allowed_changes: "{{ volume_case.allowed | default([]) }}"
+        volume_continuity_guard_check_removed: "{{ volume_case.check_removed | default(true) }}"
+        volume_continuity_guard_hint: "Rerun with --allow-volume-change NAME."
+  rescue:
+    - name: Record rejection for {{ volume_case.name }}
+      ansible.builtin.set_fact:
+        volume_case_failed: true
+        volume_case_message: "{{ ansible_failed_result.msg | default('') }}"
+
+- name: Prove expected outcome for {{ volume_case.name }}
+  ansible.builtin.assert:
+    that:
+      - volume_case_failed == volume_case.expect_failure
+      - >-
+        volume_case.expect_in_message | default([])
+        | reject('in', volume_case_message) | list | length == 0
+    fail_msg: "Unexpected outcome for {{ volume_case.name }}: {{ volume_case_message }}"

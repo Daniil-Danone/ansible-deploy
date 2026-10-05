@@ -1,7 +1,0 @@
----
-- name: Manage Production backups
-  hosts: all
-  become: true
-  gather_facts: true
-  roles:
-    - role: backup

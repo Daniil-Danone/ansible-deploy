@@ -1,15 +1,18 @@
 # Windows: подготовка рабочей машины
 
-Установите Python 3.12+, Git for Windows, Docker Desktop и OpenSSH Client. В PowerShell:
+Установите Python 3.12+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git for Windows, Docker Desktop и OpenSSH Client. В PowerShell:
 
 ```powershell
-python -m venv .venv-deploy
-.\.venv-deploy\Scripts\Activate.ps1
-python -m pip install C:\path\to\ansible-deploy
+uv tool install "git+https://github.com/Daniil-Danone/ansible-deploy.git@v0.1.0"
+ansible-deploy --version
 docker version
 ssh -V
-deploy --help
+ansible-deploy --help
 ```
+
+CLI ставится глобально через [uv](https://docs.astral.sh/uv/) из приватного репозитория
+с закреплённым тегом; доступ берётся из ваших Git credentials. Вариант через SSH,
+обновление и установка из wheel релиза — в [руководстве по обновлению](../guides/upgrading.md).
 
 Временный override внешнего store для CI/изолированного теста:
 

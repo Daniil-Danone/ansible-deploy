@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      ANSIBLE_ROLES_PATH: ansible/roles
+      ANSIBLE_ROLES_PATH: src/deploy_cli/runtime/ansible/roles
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -23,15 +23,15 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e '.[dev]' ansible-core==2.18.6 ansible-lint==25.4.0 yamllint==1.37.1
-      - run: ansible-galaxy collection install -r ansible/requirements.yml
+      - run: ansible-galaxy collection install -r src/deploy_cli/runtime/ansible/requirements.yml
       - run: python -m pytest
       - run: python -m ruff check .
       - run: python -m mypy
       - run: yamllint .
-      - run: ansible-lint ansible
+      - run: ansible-lint src/deploy_cli/runtime/ansible
       - run: make syntax-check
       - run: make alloy-validate
-      - run: docker build -t ansible-deploy:ci .
+      - run: docker build -t ansible-deploy:ci src/deploy_cli/runtime
       - run: docker tag ansible-deploy:ci ansible-deploy:local && make integration-test
 
   target-os:

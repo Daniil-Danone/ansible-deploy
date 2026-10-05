@@ -20,7 +20,8 @@ from deploy_cli.models import BackupConfig, BackupRetention, EnvironmentConfig
 
 
 def _runtime() -> ModuleType:
-    path = Path("ansible/roles/backup/files/backup_runtime.py").resolve()
+    roles = Path(__file__).parents[1] / "src/deploy_cli/runtime/ansible/roles"
+    path = (roles / "backup/files/backup_runtime.py").resolve()
     module = ModuleType("backup_runtime_test")
     module.__file__ = str(path)
     exec(  # noqa: S102 - load the checked-in standalone runtime without creating pycache

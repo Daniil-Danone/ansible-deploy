@@ -8,6 +8,7 @@ import sys
 import warnings
 from pathlib import Path
 
+from . import __version__
 from .config import (
     ConfigurationError,
     load_configuration,
@@ -99,7 +100,8 @@ def _operation_secrets(config: EnvironmentConfig | MonitoringConfig) -> set[str]
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="deploy")
+    parser = argparse.ArgumentParser(prog="ansible-deploy")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     project = parser.add_mutually_exclusive_group()
     project.add_argument(
         "--project-dir",

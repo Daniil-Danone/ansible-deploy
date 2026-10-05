@@ -106,7 +106,7 @@ jobs:
           DEPLOY_SECRET_STORE_JSON: ${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}
         run: python .ansible-deploy-tool/scripts/materialize_ci_secrets.py
       - name: Verify project scaffold is synchronized
-        run: deploy --project-dir . project sync --check
+        run: ansible-deploy --project-dir . project sync --check
       - name: Apply complete verified image map to Compose
         env:
           IMAGE_MAP: ${{ inputs.image_map }}
@@ -123,11 +123,11 @@ jobs:
           HEALTH_URL: ${{ inputs.health_url }}
         run: |
           if [ "$TARGET" = prod ]; then
-            deploy --project-dir . prod --version "$DEPLOYMENT_SHA" --yes
+            ansible-deploy --project-dir . prod --version "$DEPLOYMENT_SHA" --yes
           else
-            deploy --project-dir . stage --version "$DEPLOYMENT_SHA"
+            ansible-deploy --project-dir . stage --version "$DEPLOYMENT_SHA"
           fi
-          deploy --project-dir . status "$TARGET"
+          ansible-deploy --project-dir . status "$TARGET"
           curl --fail --silent --show-error --retry 5 --retry-all-errors "$HEALTH_URL" >/dev/null
       - name: Remove temporary secret store
         if: always()

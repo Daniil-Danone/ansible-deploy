@@ -4,7 +4,8 @@ from pathlib import Path
 
 ALLOY_IMAGE = "grafana/alloy:v1.10.2"
 ROOT = Path(__file__).parents[1]
-TEMPLATE = ROOT / "ansible/roles/collector/templates/config.alloy.j2"
+ROLES = ROOT / "src/deploy_cli/runtime/ansible/roles"
+TEMPLATE = ROLES / "collector/templates/config.alloy.j2"
 
 
 def render_fixture() -> str:

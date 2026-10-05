@@ -1,4 +1,3 @@
-import hashlib
 import os
 import shutil
 import subprocess
@@ -213,27 +212,6 @@ def test_packaged_runtime_is_complete() -> None:
         for part in relative.split("/"):
             current = current.joinpath(part)
         assert current.is_file(), relative
-
-
-def test_packaged_runtime_matches_contributor_sources() -> None:
-    source = Path(__file__).parents[1]
-    runtime = runtime_resources()
-    pairs = [
-        (source / "Dockerfile", runtime.joinpath("Dockerfile")),
-        (source / "docker-entrypoint.py", runtime.joinpath("docker-entrypoint.py")),
-        (source / "password-once.sh", runtime.joinpath("password-once.sh")),
-    ]
-    for local in (source / "ansible").rglob("*"):
-        if local.is_file() and "__pycache__" not in local.parts and local.suffix != ".pyc":
-            packaged = runtime.joinpath("ansible")
-            for part in local.relative_to(source / "ansible").parts:
-                packaged = packaged.joinpath(part)
-            pairs.append((local, packaged))
-
-    for local, packaged in pairs:
-        assert hashlib.sha256(local.read_bytes()).digest() == hashlib.sha256(
-            packaged.read_bytes()
-        ).digest(), local
 
 
 def test_runtime_build_uses_ephemeral_minimal_context(

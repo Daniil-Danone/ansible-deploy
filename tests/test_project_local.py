@@ -2,7 +2,6 @@ import hashlib
 import os
 import shutil
 import subprocess
-import sys
 import threading
 from io import StringIO
 from pathlib import Path
@@ -428,41 +427,11 @@ def test_playbook_mounts_only_addressed_project_inputs(
     assert "/opt/ansible-deploy/ansible/playbooks/update.yml" in command
 
 
-@pytest.mark.skipif(os.name == "nt" and not shutil.which("python"), reason="Python unavailable")
-def test_wheel_installs_with_runtime_outside_source_checkout(tmp_path: Path) -> None:
+def test_wheel_installs_with_runtime_outside_source_checkout(
+    tmp_path: Path, installed_wheel_python: Path
+) -> None:
     source = Path(__file__).parents[1]
-    wheel_dir = tmp_path / "wheel"
-    subprocess.run(  # noqa: S603 - fixed interpreter and argument vector
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            "--no-deps",
-            "--wheel-dir",
-            str(wheel_dir),
-            str(source),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    venv = tmp_path / "venv"
-    subprocess.run(  # noqa: S603 - fixed interpreter and argument vector
-        [sys.executable, "-m", "venv", "--system-site-packages", str(venv)],
-        check=True,
-        timeout=60,
-    )
-    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    wheel = next(wheel_dir.glob("*.whl"))
-    subprocess.run(  # noqa: S603 - isolated venv executable and local wheel
-        [str(python), "-m", "pip", "install", "--no-deps", str(wheel)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    python = installed_wheel_python
     outside = tmp_path / "outside"
     outside.mkdir()
     result = subprocess.run(  # noqa: S603 - isolated venv executable

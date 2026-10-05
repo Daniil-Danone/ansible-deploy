@@ -25,7 +25,8 @@ application/
 age identity.
 
 Внешний store определяется committed `.deploy/project-id`, поэтому clone/move не меняет
-namespace. Пример логической структуры root:
+namespace. Каталоги и заготовки secret-файлов создаёт `ansible-deploy secrets init`.
+Пример логической структуры root:
 
 ```text
 <external-root>/

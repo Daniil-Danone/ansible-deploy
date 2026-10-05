@@ -125,10 +125,13 @@
       'templating': {'list': [
       {'name': 'environment', 'type': 'query', 'datasource': {'type': 'loki', 'uid': 'loki'},
       'query': {'type': 1, 'label': 'environment', 'refId': 'LokiVariableQueryEditor-VariableQuery'},
-      'refresh': 2},
+      'refresh': 2, 'includeAll': true, 'allValue': '.+', 'multi': true,
+      'current': {'text': 'All', 'value': '$__all'}},
       {'name': 'service', 'type': 'query', 'datasource': {'type': 'loki', 'uid': 'loki'},
       'query': {'type': 1, 'label': 'service', 'stream': '{environment=~"$environment"}',
-      'refId': 'LokiVariableQueryEditor-VariableQuery'}, 'refresh': 2}]},
+      'refId': 'LokiVariableQueryEditor-VariableQuery'}, 'refresh': 2,
+      'includeAll': true, 'allValue': '.+', 'multi': true,
+      'current': {'text': 'All', 'value': '$__all'}}]},
       'panels': [{'type': 'logs', 'title': 'Logs', 'datasource': {'type': 'loki', 'uid': 'loki'},
       'targets': [{'expr': '{environment=~"$environment", service=~"$service"}', 'refId': 'A'}],
       'gridPos': {'h': 20, 'w': 24, 'x': 0, 'y': 0}}]} | to_json }}

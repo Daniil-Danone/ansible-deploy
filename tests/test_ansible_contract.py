@@ -243,6 +243,11 @@ def test_monitoring_contract_has_retention_provisioning_tls_and_no_raw_public_po
     assert "url: http://loki:3100" in monitoring
     assert "central-logs" in monitoring
     assert "environment=~" in monitoring and "service=~" in monitoring
+    # Loki rejects a selector whose every matcher accepts an empty value, so the
+    # dashboard variables must default to All with an ".+" expansion.
+    assert monitoring.count("'allValue': '.+'") == 2
+    assert monitoring.count("'includeAll': true") == 2
+    assert monitoring.count("'value': '$__all'") == 2
     assert '127.0.0.1:{{ monitoring_loki_port }}:3100' in monitoring
     assert '127.0.0.1:{{ monitoring_grafana_port }}:3000' in monitoring
     assert '"0.0.0.0:' not in monitoring

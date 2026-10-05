@@ -29,7 +29,14 @@ def test_reusable_deploy_has_protected_serial_environment_contract() -> None:
     assert deploy["environment"] == "${{ inputs.environment }}"
     assert deploy["concurrency"]["cancel-in-progress"] == "false"
     assert deploy["timeout-minutes"] == "45"
-    assert "inputs.deployment_sha" in deploy["steps"][0]["env"]["DEPLOYMENT_SHA"]
+    assert "env" not in deploy
+    secret_path = next(
+        step
+        for step in deploy["steps"]
+        if step["name"] == "Set temporary secret store path"
+    )
+    assert "$RUNNER_TEMP/ansible-deploy-secrets" in secret_path["run"]
+    assert ">> \"$GITHUB_ENV\"" in secret_path["run"]
     assert deploy["steps"][-1]["if"] == "always()"
     materialize = next(
         step
@@ -48,7 +55,10 @@ def test_reusable_deploy_has_protected_serial_environment_contract() -> None:
         "${{ secrets.CLI_REPOSITORY_TOKEN }}"  # noqa: S105 - expression
     )
     assert cli_checkout["with"]["persist-credentials"] == "false"
-    validation = deploy["steps"][0]
+    validation = next(
+        step for step in deploy["steps"] if step["name"] == "Validate immutable inputs"
+    )
+    assert "inputs.deployment_sha" in validation["env"]["DEPLOYMENT_SHA"]
     assert validation["env"]["CLI_REPOSITORY_TOKEN"] == (
         "${{ secrets.CLI_REPOSITORY_TOKEN }}"  # noqa: S105 - expression
     )

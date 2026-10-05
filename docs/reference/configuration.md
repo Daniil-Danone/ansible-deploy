@@ -172,8 +172,8 @@ Production `backup` задаёт schedule, remote, external `credentials_file`, 
 - в Compose `environment` допустимы только ссылки на переменные внешнего env-файла —
   `${NAME}` или `${NAME:?message}` — включая переменные с secret-like именами
   (`POSTGRES_PASSWORD: ${DB_PASSWORD}` разрешён); запрещены литеральные secrets под
-  secret-like ключом, значения по умолчанию у интерполяций (`${NAME:-value}`,
-  `${NAME:+value}`) и встроенные credentials (private key, `scheme://user:pass@host`)
+  secret-like ключом, значения по умолчанию у интерполяций под secret-like
+  ключом (`${NAME:-value}`, `${NAME:+value}`) и встроенные credentials (private key, `scheme://user:pass@host`)
   в литеральной части. Сами значения находятся во внешнем `application.env_file`,
   указанном только относительным именем.
 - service `env_file` (строка, список или длинная форма `- path: x` с optional boolean

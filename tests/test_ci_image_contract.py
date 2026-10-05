@@ -90,6 +90,31 @@ def test_demo_plan_builds_every_declared_image_service(tmp_path: Path) -> None:
     assert set(repositories) == {"backend", "frontend"}
 
 
+def test_plan_rejects_services_sharing_one_image_repository(tmp_path: Path) -> None:
+    project = _demo(tmp_path)
+    config_path = project / ".deploy/images.yml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["services"]["frontend"]["image"] = config["services"]["backend"]["image"]
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    result = _run(
+        "plan",
+        "--project-dir",
+        str(project),
+        "--registry-prefix",
+        "ghcr.io/acme",
+        "--deployment-sha",
+        SHA,
+        "--github-output",
+        str(tmp_path / "plan.output"),
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "share repository name 'demo-backend'" in result.stderr
+    assert not (tmp_path / "plan.output").exists()
+
+
 def test_collect_requires_complete_exact_service_result_set(tmp_path: Path) -> None:
     project = _demo(tmp_path)
     _, repositories = _plan(project, tmp_path)

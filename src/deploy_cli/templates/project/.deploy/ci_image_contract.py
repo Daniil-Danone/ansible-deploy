@@ -109,6 +109,7 @@ def _configuration(project: Path) -> tuple[dict[str, dict[str, str]], dict[str, 
         raise ContractError("images.yml must declare exactly stage and prod environments")
 
     services: dict[str, dict[str, str]] = {}
+    image_services: dict[str, str] = {}
     for service, raw in sorted(raw_services.items()):
         if not isinstance(service, str) or SERVICE_PATTERN.fullmatch(service) is None:
             raise ContractError(f"Invalid image service: {service!r}")
@@ -117,6 +118,13 @@ def _configuration(project: Path) -> tuple[dict[str, dict[str, str]], dict[str, 
         image = raw["image"]
         if not isinstance(image, str) or IMAGE_PATTERN.fullmatch(image) is None:
             raise ContractError(f"Image service {service!r} has an invalid image name")
+        existing_service = image_services.get(image)
+        if existing_service is not None:
+            raise ContractError(
+                f"Image services {existing_service!r} and {service!r} share "
+                f"repository name {image!r}"
+            )
+        image_services[image] = service
         context_relative = _normalized_relative(
             raw["context"], field=f"{service} context"
         )

@@ -116,11 +116,19 @@ def load_images_configuration(
         raise ConfigurationError("Image publishing configuration has no services")
     if environment not in config.environments:
         raise ConfigurationError(f"Image publishing has no {environment} environment")
+    image_services: dict[str, str] = {}
     for service, build in config.services.items():
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", service):
             raise ConfigurationError(f"Invalid Compose service name in images.yml: {service!r}")
         if not re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", build.image):
             raise ConfigurationError(f"Invalid registry image name for service {service!r}")
+        existing_service = image_services.get(build.image)
+        if existing_service is not None:
+            raise ConfigurationError(
+                f"Image services {existing_service!r} and {service!r} share "
+                f"registry image {build.image!r}"
+            )
+        image_services[build.image] = service
         context = _contained(project, build.context, label=f"Build context for {service}")
         if not context.is_dir():
             raise ConfigurationError(f"Build context for {service!r} is not a directory: {context}")

@@ -887,6 +887,17 @@ def test_build_context_escape_is_rejected(tmp_path: Path) -> None:
         images.load_images_configuration(project, "stage")
 
 
+def test_duplicate_registry_image_is_rejected(tmp_path: Path) -> None:
+    project = _demo(tmp_path)
+    config_path = project / ".deploy/images.yml"
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["services"]["frontend"]["image"] = raw["services"]["backend"]["image"]
+    config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="share registry image 'demo-backend'"):
+        images.load_images_configuration(project, "stage")
+
+
 def test_surgical_update_preserves_comments_and_yaml_scalars(tmp_path: Path) -> None:
     project = _demo(tmp_path)
     compose = project / "deploy/compose.stage.yml"

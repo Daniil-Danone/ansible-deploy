@@ -1,0 +1,21 @@
+---
+schema_version: 2
+environment: restore
+source_environment: prod
+server:
+  host: restore.example.com
+  ssh_port: 22
+  bootstrap_user: root
+  deploy_user: deploy
+  ssh_key: keys/restore_ed25519
+  public_key: keys/restore_ed25519.pub
+  host_key_fingerprints: [SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD]
+application:
+  compose: deploy/compose.restore.yml
+  env_file: environments/restore/app.env
+  registry_auth_file: environments/restore/registry-auth.json
+  remote_dir: /srv/myapp-restore
+  allowed_loopback_ports: [8080]
+domain: restore.example.com
+acme_email: ops@example.com
+health_path: /health

@@ -1,32 +1,36 @@
 # Документация
 
-## Первый deploy
+Начинайте с [канонического runbook](runbook.md): это единственная полная
+последовательность от scaffold до проверки Production. ОС-инструкции содержат только
+установку и синтаксис своей платформы:
 
 - [Windows](getting-started/windows.md)
 - [macOS](getting-started/macos.md)
 - [Ubuntu](getting-started/ubuntu.md)
 
-Все три руководства доводят один и тот же demo-app до HTTPS. Они не ссылаются друг на
-друга: можно открыть только нужную платформу и выполнить шаги сверху вниз.
+## Эксплуатация
 
-## Практические руководства
+- [Backup, Restore Drill и disaster recovery](guides/backup-restore.md)
+- [GitHub Actions CI/CD](guides/ci-cd.md)
+- [Обновление CLI и project sync](guides/upgrading.md)
+- [Production](guides/production.md)
+- [Monitoring и collectors](guides/monitoring.md)
+- [Приватные registry](guides/private-registries.md)
+- [Диагностика и восстановление после ошибки](troubleshooting.md)
 
-- [Demo-приложение](guides/demo-app.md) — что находится в примере и как проверить результат.
-- [Настоящий проект](guides/real-project.md) — backend, frontend, admin, gateway, БД и Redis.
-- [Приватные registry](guides/private-registries.md) — два токена и безопасный auth-файл.
-- [Production](guides/production.md) — изоляция, подтверждение и rollback.
-- [Централизованные логи](guides/monitoring.md) — Grafana, Loki и Alloy collectors.
-
-## Понимание системы
-
-- [Как работает deploy](concepts/how-it-works.md)
-- [SSH, пароли и ключи](concepts/ssh-and-keys.md)
-- [Что CLI меняет на сервере](concepts/server-state.md)
-
-## Справочник
+## Справочник и модель системы
 
 - [Команды CLI](reference/cli.md)
-- [Конфигурация](reference/configuration.md)
-- [Структура проекта](reference/project-layout.md)
-- [Безопасность](security.md)
-- [Решение проблем](troubleshooting.md)
+- [Конфигурация schema v2](reference/configuration.md)
+- [Структура application repository](reference/project-layout.md)
+- [Как работает deploy](concepts/how-it-works.md)
+- [SSH и ключи](concepts/ssh-and-keys.md)
+- [Управляемое состояние сервера](concepts/server-state.md)
+- [Security boundaries](security.md)
+
+## Статус доказательств
+
+Unit/contract/integration-проверки подтверждают парсинг конфигурации, защиту путей,
+redaction, scaffold sync, Ansible syntax и структуру workflows. Проверки на реальных
+VPS, DNS, GitHub Environment approval и Google Drive выполняются вручную с
+инфраструктурой заказчика; зелёные локальные тесты не заменяют эти проверки.

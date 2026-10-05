@@ -1,0 +1,6 @@
+---
+schema_version: 1
+services: {}
+environments:
+  stage: {compose: deploy/compose.stage.yml}
+  prod: {compose: deploy/compose.prod.yml}

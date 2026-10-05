@@ -1,0 +1,17 @@
+---
+schema_version: 2
+environment: monitoring
+server:
+  host: grafana.example.com
+  ssh_port: 22
+  bootstrap_user: root
+  deploy_user: deploy
+  ssh_key: keys/monitoring_ed25519
+  public_key: keys/monitoring_ed25519.pub
+  host_key_fingerprints: [SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC]
+domain: grafana.example.com
+acme_email: ops@example.com
+monitoring:
+  remote_dir: /opt/ansible-deploy/monitoring
+  secrets_file: environments/monitoring/monitoring.env
+  retention_days: 30

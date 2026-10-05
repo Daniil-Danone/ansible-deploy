@@ -205,7 +205,7 @@ def _reject_secret_collisions(path: Path, protected: dict[str, Path], *, field: 
 
 @overload
 def load_configuration(
-    project_dir: Path, environment: Literal["stage", "prod"]
+    project_dir: Path, environment: Literal["stage", "prod", "restore"]
 ) -> tuple[GlobalConfig, EnvironmentConfig]: ...
 
 
@@ -224,7 +224,7 @@ def load_configuration(
 def load_configuration(
     project_dir: Path, environment: str
 ) -> tuple[GlobalConfig, EnvironmentConfig | MonitoringConfig]:
-    if environment not in {"stage", "prod", "monitoring"}:
+    if environment not in {"stage", "prod", "restore", "monitoring"}:
         raise ConfigurationError(f"Environment is not implemented yet: {environment}")
     project_dir = project_dir.resolve()
     config_root = _configuration_root(project_dir)
@@ -297,6 +297,17 @@ def load_configuration(
             field="SSH public key",
             secret=False,
         )
+        if env_config.backup is not None:
+            env_config.backup.credentials_file = _external_file_path(
+                project_dir,
+                env_config.backup.credentials_file,
+                field="backup credentials",
+            )
+            env_config.backup.age_identity_file = _external_file_path(
+                project_dir,
+                env_config.backup.age_identity_file,
+                field="age identity",
+            )
     else:
         app.env_file = _project_application_path(
             project_dir, app.env_file, field="environment file"
@@ -335,6 +346,32 @@ def load_configuration(
                 "README": project_dir / "README.md",
             },
             field="Collector password",
+        )
+    if env_config.backup is not None:
+        protected = {
+            "Compose": app.compose,
+            "environment file": app.env_file,
+            "registry authentication": app.registry_auth_file or Path("/__absent__"),
+            "collector password": (
+                env_config.collector.password_file
+                if env_config.collector is not None
+                else Path("/__absent__")
+            ),
+            "SSH private key": env_config.server.ssh_key,
+            "SSH public key": env_config.server.public_key,
+            "global config": config_root / "config/global.yml",
+            "environment config": env_path,
+            "README": project_dir / "README.md",
+        }
+        _reject_secret_collisions(
+            env_config.backup.credentials_file,
+            {**protected, "age identity": env_config.backup.age_identity_file},
+            field="Backup credentials",
+        )
+        _reject_secret_collisions(
+            env_config.backup.age_identity_file,
+            {**protected, "backup credentials": env_config.backup.credentials_file},
+            field="Age identity",
         )
     _reject_registry_auth_collisions(project_dir, config_root, env_path, env_config)
     if env_config.schema_version == 2:
@@ -398,6 +435,44 @@ def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) 
         raise ConfigurationError(
             f"Observability secret is invalid for {config.environment}"
         ) from None
+
+
+def validate_backup_inputs(config: EnvironmentConfig, *, require_identity: bool = False) -> None:
+    if config.environment != "prod" or config.backup is None or not config.backup.enabled:
+        raise ConfigurationError("Production backup is not enabled")
+    if config.schema_version != 2:
+        raise ConfigurationError("Backup requires schema v2 external secret storage")
+    required = [("backup credentials", config.backup.credentials_file)]
+    if require_identity:
+        required.append(("age identity", config.backup.age_identity_file))
+    for field, path in required:
+        try:
+            validate_external_input_for_use(config, path, field=field, secret=True)
+            if not path.is_file():
+                raise ConfigurationError(f"Required {field} is unavailable")
+            validate_secret_permissions(path)
+        except ConfigurationError:
+            raise
+        except (SecretStoreError, OSError, SecretFileError, ValueError):
+            raise ConfigurationError(f"Unable to validate {field}") from None
+
+
+def validate_restore_isolation(source: EnvironmentConfig, target: EnvironmentConfig) -> None:
+    if source.environment != "prod" or target.environment != "restore":
+        raise ConfigurationError("Restore requires Production source and Restore target")
+    reused = []
+    if source.domain == target.domain:
+        reused.append("domain")
+    if source.application.remote_dir == target.application.remote_dir:
+        reused.append("remote runtime")
+    if source.application.compose == target.application.compose:
+        reused.append("Compose")
+    if reused:
+        raise ConfigurationError("Restore must not reuse Production " + ", ".join(reused))
+    if _host_addresses(source.server.host, source.server.ssh_port).intersection(
+        _host_addresses(target.server.host, target.server.ssh_port)
+    ):
+        raise ConfigurationError("Restore and Production server hosts resolve to the same address")
 
 
 def validate_local_inputs(

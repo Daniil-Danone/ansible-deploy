@@ -9,7 +9,12 @@ from pathlib import Path
 import yaml
 
 from .config import read_external_secret_bytes
-from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig
+from .models import (
+    EnvironmentConfig,
+    GlobalConfig,
+    MonitoringConfig,
+    is_backup_identifier,
+)
 from .runner import AnsibleRunner, RunnerError, ansible_vars, prepare_state_directory
 
 
@@ -113,30 +118,16 @@ def _normalized_address(value: str | ipaddress.IPv4Address | ipaddress.IPv6Addre
     return str(address)
 
 
-def deploy(
-    repo: Path,
-    global_config: GlobalConfig,
+def _ensure_managed_access(
     config: EnvironmentConfig,
     runner: AnsibleRunner,
+    variables: dict[str, object],
+    bootstrap_inventory: Path,
+    managed_inventory: Path,
     *,
     dry_run: bool,
-    deployment_version: str = "unmanaged",
     bootstrap_password: str | None = None,
 ) -> None:
-    checksum, images = deployment_manifest(config)
-    variables = ansible_vars(
-        global_config,
-        config,
-        deployment_version=deployment_version,
-        deployment_checksum=checksum,
-        deployment_images=images,
-    )
-    runner.build_image()
-    runner.trust_host(
-        config.server.host, config.server.ssh_port, config.server.host_key_fingerprints
-    )
-    bootstrap_inventory = write_inventory(repo, config, bootstrap=True)
-    managed_inventory = write_inventory(repo, config, bootstrap=False)
     managed_error: RunnerError | None = None
     try:
         runner.playbook(
@@ -212,6 +203,41 @@ def deploy(
             config.server.ssh_key,
             exit_code=4,
         )
+
+
+def deploy(
+    repo: Path,
+    global_config: GlobalConfig,
+    config: EnvironmentConfig,
+    runner: AnsibleRunner,
+    *,
+    dry_run: bool,
+    deployment_version: str = "unmanaged",
+    bootstrap_password: str | None = None,
+) -> None:
+    checksum, images = deployment_manifest(config)
+    variables = ansible_vars(
+        global_config,
+        config,
+        deployment_version=deployment_version,
+        deployment_checksum=checksum,
+        deployment_images=images,
+    )
+    runner.build_image()
+    runner.trust_host(
+        config.server.host, config.server.ssh_port, config.server.host_key_fingerprints
+    )
+    bootstrap_inventory = write_inventory(repo, config, bootstrap=True)
+    managed_inventory = write_inventory(repo, config, bootstrap=False)
+    _ensure_managed_access(
+        config,
+        runner,
+        variables,
+        bootstrap_inventory,
+        managed_inventory,
+        dry_run=dry_run,
+        bootstrap_password=bootstrap_password,
+    )
     if not dry_run:
         runner.playbook(
             "abort_release.yml",
@@ -532,3 +558,140 @@ def monitoring_status(config: MonitoringConfig, *, timeout: float = 10.0) -> Non
                 raise RunnerError(f"Grafana health returned HTTP {response.status}", 7)
     except (OSError, urllib.error.URLError) as exc:
         raise RunnerError(f"Grafana health check failed: {exc}", 7) from exc
+
+
+def _backup_variables(source: EnvironmentConfig, target: EnvironmentConfig) -> dict[str, object]:
+    backup = source.backup
+    if backup is None:
+        raise RunnerError("Production backup is not configured", 8)
+    return {
+        "app_environment": target.environment,
+        "backup_schedule": backup.schedule,
+        "backup_id": "",
+        "backup_runtime_config": {
+            "age_identity": "/run/ansible-deploy-age-identity",
+            "age_recipient": backup.age_recipient,
+            "compose_file": f"{target.application.remote_dir}/current/compose.yml",
+            # Destinations remain relative here. Each backup records an immutable,
+            # encrypted source map and resolves it below the selected Restore root.
+            "include": [item.model_dump(mode="json") for item in backup.include],
+            "rclone_config": "/etc/ansible-deploy/backup/rclone.conf",
+            "remote": backup.remote,
+            "restore_root": target.application.remote_dir,
+            "result_file": "/var/lib/ansible-deploy/backup/last-result.json",
+            "retention": backup.retention.model_dump(),
+        },
+    }
+
+
+def backup_operation(
+    repo: Path,
+    global_config: GlobalConfig,
+    config: EnvironmentConfig,
+    runner: AnsibleRunner,
+    *,
+    action: str,
+) -> None:
+    runner.build_image()
+    runner.trust_host(
+        config.server.host, config.server.ssh_port, config.server.host_key_fingerprints
+    )
+    inventory = write_inventory(repo, config, bootstrap=False)
+    variables = ansible_vars(global_config, config)
+    variables.update(_backup_variables(config, config))
+    variables["backup_action"] = action
+    runner.playbook(
+        "guard_environment.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        exit_code=8,
+    )
+    runner.playbook(
+        "backup.yml",
+        inventory,
+        variables,
+        config.server.ssh_key,
+        backup_credentials_file=(
+            config.backup.credentials_file
+            if config.backup is not None
+            else None
+        ),
+        exit_code=8,
+    )
+
+
+def restore_backup(
+    repo: Path,
+    global_config: GlobalConfig,
+    source: EnvironmentConfig,
+    target: EnvironmentConfig,
+    runner: AnsibleRunner,
+    *,
+    backup_id: str,
+    bootstrap_password: str | None = None,
+) -> None:
+    if not is_backup_identifier(backup_id):
+        raise RunnerError("Backup restore identifier is invalid", 8)
+    if target.environment != "restore":
+        raise RunnerError("Backup restore target must be the dedicated restore environment", 8)
+    if source.backup is None:
+        raise RunnerError("Production backup is not configured", 8)
+    checksum, images = deployment_manifest(target)
+    variables = ansible_vars(
+        global_config,
+        target,
+        deployment_version=f"restore-{backup_id}",
+        deployment_checksum=checksum,
+        deployment_images=images,
+    )
+    runner.build_image()
+    runner.trust_host(
+        target.server.host, target.server.ssh_port, target.server.host_key_fingerprints
+    )
+    bootstrap_inventory = write_inventory(repo, target, bootstrap=True)
+    inventory = write_inventory(repo, target, bootstrap=False)
+    _ensure_managed_access(
+        target,
+        runner,
+        variables,
+        bootstrap_inventory,
+        inventory,
+        dry_run=False,
+        bootstrap_password=bootstrap_password,
+    )
+    runner.playbook(
+        "restore_prepare.yml",
+        inventory,
+        variables,
+        target.server.ssh_key,
+        compose_file=target.application.compose,
+        env_file=target.application.env_file,
+        registry_auth_file=target.application.registry_auth_file,
+        exit_code=8,
+    )
+    variables.update(_backup_variables(source, target))
+    variables.update({"backup_action": "restore", "backup_id": backup_id})
+    runner.playbook(
+        "guard_environment.yml",
+        inventory,
+        variables,
+        target.server.ssh_key,
+        exit_code=8,
+    )
+    runner.playbook(
+        "backup_restore.yml",
+        inventory,
+        variables,
+        target.server.ssh_key,
+        backup_credentials_file=source.backup.credentials_file,
+        age_identity_file=source.backup.age_identity_file,
+        exit_code=8,
+    )
+    runner.playbook(
+        "health.yml",
+        inventory,
+        variables,
+        target.server.ssh_key,
+        exit_code=8,
+    )

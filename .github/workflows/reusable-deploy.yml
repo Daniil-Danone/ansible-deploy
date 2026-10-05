@@ -1,0 +1,131 @@
+---
+name: Reusable deployment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment and deploy target
+        required: true
+        type: string
+      deployment_sha:
+        description: Full immutable application commit SHA
+        required: true
+        type: string
+      tool_sha:
+        description: Full immutable ansible-deploy commit SHA
+        required: true
+        type: string
+      health_url:
+        description: Expected HTTPS health endpoint
+        required: true
+        type: string
+      image_map:
+        description: Complete JSON service-to-immutable-image map from the build gate
+        required: true
+        type: string
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment }}
+    if: inputs.environment == 'stage' || inputs.environment == 'production'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ github.repository }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      ANSIBLE_DEPLOY_SECRETS_DIR: ${{ runner.temp }}/ansible-deploy-secrets
+    steps:
+      - name: Validate immutable inputs
+        env:
+          DEPLOYMENT_SHA: ${{ inputs.deployment_sha }}
+          TOOL_SHA: ${{ inputs.tool_sha }}
+          HEALTH_URL: ${{ inputs.health_url }}
+          IMAGE_MAP: ${{ inputs.image_map }}
+          CLI_REPOSITORY_TOKEN: ${{ secrets.CLI_REPOSITORY_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import re
+          from urllib.parse import urlsplit
+
+          for name in ("DEPLOYMENT_SHA", "TOOL_SHA"):
+              if re.fullmatch(r"[0-9a-f]{40}", os.environ[name]) is None:
+                  raise SystemExit(f"{name} must be a full lowercase Git SHA")
+          health = urlsplit(os.environ["HEALTH_URL"])
+          if health.scheme != "https" or not health.hostname or health.username:
+              raise SystemExit("HEALTH_URL must be an HTTPS URL without credentials")
+          try:
+              image_map = json.loads(os.environ["IMAGE_MAP"])
+          except json.JSONDecodeError as exc:
+              raise SystemExit("IMAGE_MAP must be valid JSON") from exc
+          if not isinstance(image_map, dict) or not image_map:
+              raise SystemExit("IMAGE_MAP must be a non-empty object")
+          for service, reference in image_map.items():
+              if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", service) is None:
+                  raise SystemExit("IMAGE_MAP contains an invalid service")
+              if re.fullmatch(
+                  r"[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+@sha256:[0-9a-f]{64}",
+                  reference,
+              ) is None:
+                  raise SystemExit("IMAGE_MAP contains a non-immutable reference")
+          if not os.environ["CLI_REPOSITORY_TOKEN"]:
+              raise SystemExit("CLI_REPOSITORY_TOKEN is required for the private CLI checkout")
+          PY
+      - name: Check out application at immutable SHA
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.deployment_sha }}
+          persist-credentials: false
+      - name: Check out deployment CLI at immutable SHA
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: Daniil-Danone/ansible-deploy
+          ref: ${{ inputs.tool_sha }}
+          path: .ansible-deploy-tool
+          token: ${{ secrets.CLI_REPOSITORY_TOKEN }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install deployment CLI
+        run: python -m pip install ./.ansible-deploy-tool
+      - name: Materialize temporary external secret store
+        env:
+          DEPLOY_SECRET_STORE_JSON: ${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}
+        run: python .ansible-deploy-tool/scripts/materialize_ci_secrets.py
+      - name: Verify project scaffold is synchronized
+        run: deploy --project-dir . project sync --check
+      - name: Apply complete verified image map to Compose
+        env:
+          IMAGE_MAP: ${{ inputs.image_map }}
+          TARGET: ${{ inputs.environment == 'production' && 'prod' || 'stage' }}
+        run: |
+          python .deploy/ci_image_contract.py apply \
+            --project-dir . \
+            --environment "$TARGET" \
+            --image-map-json "$IMAGE_MAP"
+      - name: Deploy and verify health
+        env:
+          TARGET: ${{ inputs.environment == 'production' && 'prod' || 'stage' }}
+          DEPLOYMENT_SHA: ${{ inputs.deployment_sha }}
+          HEALTH_URL: ${{ inputs.health_url }}
+        run: |
+          if [ "$TARGET" = prod ]; then
+            deploy --project-dir . prod --version "$DEPLOYMENT_SHA" --yes
+          else
+            deploy --project-dir . stage --version "$DEPLOYMENT_SHA"
+          fi
+          deploy --project-dir . status "$TARGET"
+          curl --fail --silent --show-error --retry 5 --retry-all-errors "$HEALTH_URL" >/dev/null
+      - name: Remove temporary secret store
+        if: always()
+        run: rm -rf -- "$ANSIBLE_DEPLOY_SECRETS_DIR"

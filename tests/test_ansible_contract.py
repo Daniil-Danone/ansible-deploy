@@ -77,6 +77,41 @@ def test_release_metadata_and_rollback_preserve_safe_permissions_and_health() ->
     assert "Restore original current-version metadata" in restore
 
 
+def test_compose_failures_collect_bounded_safe_diagnostics() -> None:
+    diagnostics = _text("ansible/roles/compose_diagnostics/tasks/main.yml")
+    application = _text("ansible/roles/application/tasks/main.yml")
+    rollback = _text("ansible/playbooks/rollback.yml")
+    abort = _text("ansible/playbooks/abort_release.yml")
+    monitoring = _text("ansible/roles/monitoring/tasks/main.yml")
+    collector = _text("ansible/roles/collector/tasks/main.yml")
+
+    assert "ansible.builtin.command:\n    argv:" in diagnostics
+    assert "ps\n      - --all\n      - --format\n      - json" in diagnostics
+    assert "'logs', '--no-color', '--tail', '100'" in diagnostics
+    assert "failed_when: false" in diagnostics
+    for forbidden in ("compose config", "inspect", "printenv", "ansible.builtin.shell"):
+        assert forbidden not in diagnostics
+    for workflow in (application, rollback, abort, monitoring, collector):
+        assert "name: compose_diagnostics" in workflow
+        assert "safe diagnostics are shown above" in workflow
+    for workflow in (application, monitoring, collector):
+        assert "- config\n          - --quiet" in workflow
+        assert "configuration validation failed" in workflow
+        assert "image pull or daemon reconciliation failed" in workflow
+        assert "diagnostics are unavailable" in workflow
+    assert rollback.count("- config\n              - --quiet") == 1
+    assert "Rollback Compose configuration validation failed" in rollback
+    assert "rollback_compose_failure_reason" in rollback
+    assert "Collect rollback diagnostics without masking the original failure" in rollback
+    assert "Safe rollback Compose diagnostics are unavailable" in rollback
+    assert abort.count("- config\n              - --quiet") == 2
+    assert "Recovered Compose configuration validation failed" in abort
+    assert "Failed candidate Compose configuration validation failed" in abort
+    assert "release_recovery_failure_reason" in abort
+    assert "Collect release recovery diagnostics without masking the original failure" in abort
+    assert "Safe release recovery Compose diagnostics are unavailable" in abort
+
+
 def test_legacy_stage_is_verified_before_secure_snapshot_and_commit() -> None:
     adoption = _text("ansible/roles/legacy_adoption/tasks/main.yml")
     site = _text("ansible/playbooks/site.yml")
@@ -206,3 +241,20 @@ def test_observability_playbooks_are_separate_from_application_release_flow() ->
         assert "role: application" not in content
         assert "release_finalize" not in content
         assert "release_restore" not in content
+
+
+def test_backup_every_operation_converges_runtime_config_and_credentials() -> None:
+    tasks = _text("ansible/roles/backup/tasks/main.yml")
+    converge_guard = "backup_action in ['setup', 'run', 'list', 'restore']"
+
+    assert tasks.count(converge_guard) >= 4
+
+
+def test_restore_application_preflights_compose_and_preserves_original_failure() -> None:
+    tasks = _text("ansible/roles/restore_application/tasks/main.yml")
+
+    assert "config\n          - --quiet" in tasks
+    assert "failed_when: false" in tasks
+    assert "restore_preparation_failure" in tasks
+    assert "Secondary Restore diagnostics failed" in tasks
+    assert "wait: false" in tasks

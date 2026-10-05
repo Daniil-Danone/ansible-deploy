@@ -29,7 +29,12 @@
           listen [::]:80;
           server_name {{ app_domain }};
           location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
-          location / { proxy_pass http://127.0.0.1:{{ app_upstream_port }}; }
+          location / {
+              client_max_body_size {{ app_client_max_body_size }};
+              proxy_read_timeout {{ app_proxy_read_timeout }}s;
+              proxy_send_timeout {{ app_proxy_read_timeout }}s;
+              proxy_pass http://127.0.0.1:{{ app_upstream_port }};
+          }
       }
   notify:
     - Validate nginx
@@ -106,6 +111,9 @@
           add_header X-Content-Type-Options nosniff always;
           add_header X-Frame-Options DENY always;
           location / {
+              client_max_body_size {{ app_client_max_body_size }};
+              proxy_read_timeout {{ app_proxy_read_timeout }}s;
+              proxy_send_timeout {{ app_proxy_read_timeout }}s;
               proxy_pass http://127.0.0.1:{{ app_upstream_port }};
               proxy_set_header Host $host;
               proxy_set_header X-Real-IP $remote_addr;

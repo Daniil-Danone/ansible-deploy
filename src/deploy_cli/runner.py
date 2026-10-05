@@ -617,6 +617,8 @@ def ansible_vars(
                 "health_path": config.health_path,
                 "app_allowed_bind_paths": config.application.allowed_bind_paths,
                 "app_nginx_site": f"application-{config.environment}",
+                "app_client_max_body_size": config.reverse_proxy.client_max_body_size,
+                "app_proxy_read_timeout": config.reverse_proxy.proxy_read_timeout,
             }
         )
         if config.collector is not None:

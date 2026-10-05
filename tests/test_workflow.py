@@ -7,7 +7,7 @@ import pytest
 from deploy_cli.config import load_configuration as _load_configuration
 from deploy_cli.models import BackupConfig, EnvironmentConfig
 from deploy_cli.project import sync_project
-from deploy_cli.runner import RunnerError
+from deploy_cli.runner import RunnerError, ansible_vars
 from deploy_cli.workflow import (
     backup_operation,
     deploy,
@@ -564,6 +564,31 @@ def test_deployment_checksum_covers_secret_and_compose_inputs(tmp_path: Path) ->
     assert first != second
     assert images == second_images
     assert all("@sha256:" in image for image in images)
+
+
+def test_reverse_proxy_limits_reach_ansible_without_changing_release_checksum(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).parents[1] / "examples/demo-app"
+    global_config, config = load_configuration(repo, "prod")
+    env = tmp_path / "prod.env"
+    env.write_text("APP_ENV=prod\n", encoding="utf-8")
+    config.application.env_file = env
+    defaults = ansible_vars(global_config, config)
+    before, _ = deployment_manifest(config)
+
+    config.reverse_proxy.client_max_body_size = "12m"
+    config.reverse_proxy.proxy_read_timeout = 120
+    variables = ansible_vars(global_config, config)
+    after, _ = deployment_manifest(config)
+
+    assert defaults["app_client_max_body_size"] == "1m"
+    assert defaults["app_proxy_read_timeout"] == 60
+    assert variables["app_client_max_body_size"] == "12m"
+    assert variables["app_proxy_read_timeout"] == 120
+    # Limits are host routing tuning, not immutable release input: an existing version
+    # can be redeployed with new limits without tripping the reused-version guard.
+    assert before == after
 
 
 def test_failed_public_health_runs_abort_and_keeps_original_exit_code(tmp_path: Path) -> None:

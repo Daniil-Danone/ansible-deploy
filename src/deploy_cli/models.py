@@ -355,6 +355,25 @@ class BackupConfig(StrictModel):
         return self
 
 
+class ReverseProxyConfig(StrictModel):
+    # Defaults mirror the Nginx built-ins that applied before these settings existed.
+    client_max_body_size: str = "1m"
+    proxy_read_timeout: int = Field(default=60, ge=1, le=3600, strict=True)
+
+    @field_validator("client_max_body_size", mode="before")
+    @classmethod
+    def nginx_size(cls, value: Any) -> Any:
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[1-9][0-9]{0,8}[kmg]?", value, flags=re.IGNORECASE
+        ):
+            raise ValueError(
+                "client_max_body_size must be a positive Nginx size such as 512k, 12m or 1g"
+            )
+        return value.lower()
+
+
 class EnvironmentConfig(StrictModel):
     _project_dir: Path | None = PrivateAttr(default=None)
     _external_secret_root: Path | None = PrivateAttr(default=None)
@@ -369,6 +388,7 @@ class EnvironmentConfig(StrictModel):
     domain: str
     acme_email: str
     health_path: str = "/health"
+    reverse_proxy: ReverseProxyConfig = Field(default_factory=ReverseProxyConfig)
     collector: CollectorConfig | None = None
     backup: BackupConfig | None = None
 

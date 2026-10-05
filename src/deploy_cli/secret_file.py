@@ -2,7 +2,6 @@ import csv
 import ctypes
 import os
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -150,8 +149,15 @@ def windows_current_sid() -> str:
     return sid
 
 
+def _windows_system_directory() -> Path:
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    return Path(system_root) / "System32"
+
+
 def _system_executable(name: str) -> str:
-    executable = shutil.which(name)
-    if executable is None:
-        raise SecretFileError("Required Windows security utility is unavailable")
-    return executable
+    # PATH is never consulted: Git Bash and similar shells shadow System32 with
+    # look-alike tools (e.g. /usr/bin/whoami) that break SID and ACL checks.
+    executable = _windows_system_directory() / name
+    if not executable.is_file():
+        raise SecretFileError(f"Required Windows security utility is unavailable: {executable}")
+    return str(executable)

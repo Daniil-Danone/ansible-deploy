@@ -99,6 +99,17 @@ def test_compose_failures_collect_bounded_safe_diagnostics() -> None:
         assert "configuration validation failed" in workflow
         assert "image pull or daemon reconciliation failed" in workflow
         assert "diagnostics are unavailable" in workflow
+    assert rollback.count("- config\n              - --quiet") == 1
+    assert "Rollback Compose configuration validation failed" in rollback
+    assert "rollback_compose_failure_reason" in rollback
+    assert "Collect rollback diagnostics without masking the original failure" in rollback
+    assert "Safe rollback Compose diagnostics are unavailable" in rollback
+    assert abort.count("- config\n              - --quiet") == 2
+    assert "Recovered Compose configuration validation failed" in abort
+    assert "Failed candidate Compose configuration validation failed" in abort
+    assert "release_recovery_failure_reason" in abort
+    assert "Collect release recovery diagnostics without masking the original failure" in abort
+    assert "Safe release recovery Compose diagnostics are unavailable" in abort
 
 
 def test_legacy_stage_is_verified_before_secure_snapshot_and_commit() -> None:

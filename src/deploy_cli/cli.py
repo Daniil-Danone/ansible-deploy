@@ -276,26 +276,6 @@ def _secret_text_fragments(value: str) -> set[str]:
     return fragments
 
 
-def _operation_secrets(config: EnvironmentConfig) -> set[str]:
-    values = {str(config.server.ssh_key), str(config.application.env_file)}
-    env_text = read_external_secret_text(
-        config, config.application.env_file, field="application environment"
-    )
-    values.update(secrets_from_env(env_text))
-    registry = config.application.registry_auth_file
-    if registry is not None:
-        values.add(str(registry))
-        registry_text = read_external_secret_text(
-            config, registry, field="registry authentication"
-        )
-        values.update(_secret_text_fragments(registry_text))
-        try:
-            values.update(_string_values(json.loads(registry_text)))
-        except json.JSONDecodeError:
-            pass
-    return values
-
-
 def _load_and_validate(
     repo: Path, environment: str, command: str, *, action: str | None = None
 ) -> tuple[GlobalConfig, EnvironmentConfig | MonitoringConfig]:

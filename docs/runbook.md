@@ -40,17 +40,24 @@ backup/age.key
 Пути schema v2 относительны этому root. Не копируйте файлы в `.deploy/`, не передавайте
 значения через CLI arguments и не печатайте их в CI logs.
 
+SSH key можно импортировать существующей парой или не создавать заранее: первый
+обычный deploy атомарно создаст Ed25519 pair по configured paths. Dry-run ключи не
+создаёт. Не создавайте только одну половину пары и не используйте один private key для
+Stage и Production.
+
 ## 3. Stage
 
 ```bash
-deploy images publish stage --registry ghcr --namespace OWNER --ask-token
-deploy stage --dry-run
-deploy stage
+deploy images publish stage --registry ghcr --namespace OWNER --username OWNER --ask-token --ask-pull-token
+deploy stage --ask-bootstrap-password --version GIT_SHA
 deploy status stage
 ```
 
-Проверьте DNS, provider firewall, host fingerprint, Compose ports и health endpoint.
-Повторный `deploy stage` должен быть безопасен и иметь только объяснимые изменения.
+На чистом VPS первый запуск должен быть обычным deploy: dry-run не выполняет bootstrap.
+После bootstrap проверьте следующую итерацию через `deploy stage --dry-run --version
+GIT_SHA`, затем повторите обычный deploy и status. Проверьте DNS, provider firewall,
+host fingerprint, Compose ports и health endpoint. Повторный `deploy stage` должен быть
+безопасен и иметь только объяснимые изменения.
 
 ## 4. Production
 
@@ -58,24 +65,28 @@ Production использует отдельные VPS, domain, remote directory
 и registry credential. Images должны быть закреплены digest.
 
 ```bash
-deploy images publish prod --registry ghcr --namespace OWNER --ask-token
-deploy prod --dry-run
-deploy prod
+deploy images publish prod --registry ghcr --namespace OWNER --username OWNER --ask-token --ask-pull-token
+deploy prod --ask-bootstrap-password --version GIT_SHA
 deploy status prod
 ```
 
-Интерактивно введите `prod`; `--yes` предназначен для защищённой CI boundary. Не
-продолжайте, если Stage для того же Git SHA не прошёл health gate.
+Интерактивно введите `prod`; `--yes` предназначен для защищённой CI boundary. На уже
+подготовленном VPS сначала допустим `deploy prod --dry-run --version GIT_SHA`. Не
+продолжайте, если `deploy stage`, `deploy status stage` и health gate для того же Git
+SHA не прошли успешно.
 
 ## 5. Monitoring и collectors
 
 ```bash
-deploy monitoring deploy --dry-run
-deploy monitoring deploy
+deploy monitoring deploy --ask-bootstrap-password
 deploy monitoring status
-deploy collectors deploy all
+deploy collectors deploy all --yes
 deploy collectors status all
 ```
+
+На чистом Monitoring VPS dry-run также не выполняет bootstrap. После первого deploy
+проверяйте изменения через `deploy monitoring deploy --dry-run`, затем применяйте их
+обычной командой.
 
 В Grafana вручную подтвердите свежие записи Stage и Production с метками environment,
 host и service. HTTPS health monitoring не доказывает доставку логов collectors.

@@ -4,7 +4,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -98,16 +98,14 @@ def ensure_deploy_key(config: EnvironmentConfig | MonitoringConfig) -> str:
     try:
         return _ensure_deploy_key(config)
     except _KeyRollbackFailure as exc:
-        if config.schema_version != 2:
-            raise
         label = " and ".join(sorted(exc.artifacts))
         raise ConfigurationError(
             f"Unable to prepare deploy key for {config.environment}; "
             f"rollback failed and a partial {label} may remain"
         ) from None
-    except (ConfigurationError, OSError, SecretFileError):
-        if config.schema_version != 2:
-            raise
+    except ConfigurationError:
+        raise
+    except (OSError, SecretFileError):
         raise ConfigurationError(
             f"Unable to prepare deploy key for {config.environment}"
         ) from None
@@ -120,13 +118,19 @@ def _ensure_deploy_key(config: EnvironmentConfig | MonitoringConfig) -> str:
     config.server.ssh_key = private_key
     config.server.public_key = public_key
     _reject_aliased_paths(private_key, public_key)
-    context = config.external_secret_context if config.schema_version == 2 else None
-    if config.schema_version == 2:
-        if context is None:
-            raise ConfigurationError(
-                f"External key store is unavailable for {config.environment}"
-            )
-        project, root, trusted_base, validate_base = context
+    if not private_key.is_file() and public_key.is_file():
+        raise ConfigurationError(
+            f"Deploy public key exists but private key is missing: {private_key}; "
+            "restore the matching private key or choose new empty key paths"
+        )
+    context = config.external_secret_context
+    if context is None:
+        raise ConfigurationError(
+            f"External key store is unavailable for {config.environment}"
+        )
+    project, root, trusted_base, validate_base = context
+
+    def prepare_external_store() -> None:
         try:
             for path in (private_key, public_key):
                 ensure_external_parent_for_write(
@@ -140,12 +144,9 @@ def _ensure_deploy_key(config: EnvironmentConfig | MonitoringConfig) -> str:
             raise ConfigurationError(
                 f"Unable to prepare external key store for {config.environment}"
             ) from None
-    else:
-        private_key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        public_key.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     lock_path = private_key.parent / f".{private_key.name}.ansible-deploy.lock"
-    with _pair_lock(lock_path):
+    with _pair_lock(lock_path, prepare=prepare_external_store):
         _reject_aliased_paths(private_key, public_key)
         private_exists = private_key.is_file()
         public_exists = public_key.is_file()
@@ -281,7 +282,9 @@ def _reject_aliased_paths(private_key: Path, public_key: Path) -> None:
 
 
 @contextmanager
-def _pair_lock(path: Path) -> Iterator[None]:
+def _pair_lock(
+    path: Path, *, prepare: Callable[[], None] | None = None
+) -> Iterator[None]:
     if path.is_symlink():
         raise ConfigurationError(f"Deploy key lock cannot be a symlink: {path}")
     flags = os.O_RDWR
@@ -290,6 +293,8 @@ def _pair_lock(path: Path) -> Iterator[None]:
     descriptor: int | None = None
     try:
         with _pair_initialization_guard(path):
+            if prepare is not None:
+                prepare()
             _publish_pair_lock(path)
             descriptor = os.open(path, flags, 0o600)
             _lock_descriptor(descriptor)

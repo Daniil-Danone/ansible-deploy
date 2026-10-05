@@ -36,7 +36,7 @@ def _external_secret_store(
 def _copy_demo(destination: Path) -> Path:
     source = Path(__file__).parents[1] / "examples/demo-app"
     project = destination / "application with spaces"
-    shutil.copytree(source, project)
+    shutil.copytree(source, project, ignore=shutil.ignore_patterns(".deploy-state"))
     return project
 
 

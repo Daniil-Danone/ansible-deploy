@@ -5,7 +5,30 @@ CLI не должна молча менять `.deploy/` или Compose.
 
 ## Порядок
 
-1. Обновите CLI в virtual environment.
+1. Обновите CLI тем же способом, которым он был установлен. Пакет предоставляет
+   отдельную команду `deploy`, поэтому не устанавливайте его в global Python. Для
+   virtual environment:
+
+   ```bash
+   python -m pip install --upgrade /path/to/ansible-deploy
+   python -m pip show ansible-deploy
+   ```
+
+   Для изолированного tool environment выберите один менеджер:
+
+   ```bash
+   uv tool install --force --reinstall /path/to/ansible-deploy
+   uv tool list --show-paths
+   # либо
+   pipx install --force /path/to/ansible-deploy
+   pipx list
+   ```
+
+   На Windows замените source path, например на
+   `C:\Code\MyRepos\ansible-deploy\ansible-deploy`. Проверьте, какой executable будет
+   запущен: `Get-Command deploy` в PowerShell или `command -v deploy` в POSIX shell, а
+   затем `deploy --help`. У CLI пока нет отдельного `--version`; версию установленного
+   пакета показывают `pip show`, `uv tool list` или `pipx list`.
 2. Из application repository выполните dry inspection:
 
    ```bash
@@ -45,6 +68,28 @@ CLI может обновить файл. Если config/Compose изменён
 не меняя существующий Stage. Existing `.deploy/project-id` не заменяется, поэтому
 namespace внешнего secret store остаётся стабильным. Реальные секреты не копируются и
 не генерируются scaffold-командой.
+
+## Переход с deployment environment schema 1
+
+Environment schema 1 больше не принимается. Выполните `deploy project sync`, затем
+просмотрите созданные основные schema v2 файлы и/или `*.deploy-new` candidates. Старый
+корневой layout `config/` + `environments/` обычно получает новые основные файлы под
+`.deploy/`; изменённый файл, уже находящийся под `.deploy/`, может получить candidate.
+Вручную перенесите только commit-safe значения: hosts, fingerprints, domains, remote
+directories и Compose paths. Не копируйте secret values в `.deploy/`.
+
+Каждому secret field задайте нормализованное относительное имя, например
+`environments/stage/app.env`. Внешний project root покажет `deploy secrets path` —
+создайте referenced files там с ограниченными permissions. Миграция намеренно не
+автоматическая: CLI не угадывает, не копирует, не печатает и не коммитит существующие
+credentials. Перед Production проверьте `deploy project sync --check` и нужную Stage
+команду. Если credential когда-либо находился в Git, одного переноса недостаточно:
+удалите старый secret-файл из worktree, отзовите и замените credential, а необходимость
+очистки истории согласуйте по
+[security runbook](../security.md#перед-commit).
+
+Production разрешайте только после `deploy stage --dry-run`, обычного `deploy stage` и
+успешного `deploy status stage` для того же Git SHA, который будет выпущен в Production.
 
 ## Откат
 

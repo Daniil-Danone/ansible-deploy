@@ -2,7 +2,6 @@ import base64
 import binascii
 import ipaddress
 import json
-import os
 import re
 import socket
 from io import StringIO
@@ -30,7 +29,16 @@ class ConfigurationError(ValueError):
 def _load_yaml[ModelT: BaseModel](path: Path, model: type[ModelT]) -> ModelT:
     try:
         raw: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if model in {EnvironmentConfig, MonitoringConfig} and (
+            not isinstance(raw, dict) or raw.get("schema_version") != 2
+        ):
+            raise ConfigurationError(
+                f"Unsupported deployment environment schema in {path}; "
+                "only schema_version: 2 is supported"
+            )
         return model.model_validate(raw)
+    except ConfigurationError:
+        raise
     except (OSError, yaml.YAMLError, ValidationError) as exc:
         raise ConfigurationError(f"Invalid configuration {path}: {exc}") from exc
 
@@ -39,9 +47,7 @@ def _configuration_root(project_dir: Path) -> Path:
     project_deploy = project_dir / ".deploy"
     if project_deploy.is_symlink():
         raise ConfigurationError("Project .deploy directory cannot be a symbolic link")
-    if project_deploy.exists():
-        return project_deploy
-    return project_dir
+    return project_deploy
 
 
 def _project_application_path(project_dir: Path, configured: Path, *, field: str) -> Path:
@@ -55,31 +61,6 @@ def _project_application_path(project_dir: Path, configured: Path, *, field: str
     except ValueError as exc:
         raise ConfigurationError(f"Relative {field} path escapes the project directory") from exc
     return resolved
-
-
-def _project_key_path(project_dir: Path, configured: Path, *, field: str) -> Path:
-    """Validate containment canonically but preserve symlinks for the key safety guard."""
-    relative = not configured.is_absolute()
-    lexical = Path(os.path.abspath(project_dir / configured if relative else configured))
-    if relative:
-        try:
-            lexical.resolve(strict=False).relative_to(project_dir)
-        except ValueError as exc:
-            raise ConfigurationError(
-                f"Relative {field} path escapes the project directory"
-            ) from exc
-    return lexical
-
-
-def _project_secret_path(project_dir: Path, configured: Path, *, field: str) -> Path:
-    lexical = Path(
-        os.path.abspath(project_dir / configured if not configured.is_absolute() else configured)
-    )
-    try:
-        lexical.resolve(strict=False).relative_to(project_dir)
-    except ValueError as exc:
-        raise ConfigurationError(f"{field} path must stay inside the project directory") from exc
-    return lexical
 
 
 def _external_file_path(
@@ -115,8 +96,6 @@ def validate_external_input_for_use(
     field: str,
     secret: bool = True,
 ) -> None:
-    if config.schema_version != 2:
-        return
     context = config.external_secret_context
     if context is None:
         raise ConfigurationError(
@@ -241,29 +220,18 @@ def load_configuration(
             f"file declares {env_config.environment!r}"
         )
     if isinstance(env_config, MonitoringConfig):
-        if env_config.schema_version == 2:
-            env_config.monitoring.secrets_file = _external_file_path(
-                project_dir, env_config.monitoring.secrets_file, field="monitoring secrets"
-            )
-            env_config.server.ssh_key = _external_file_path(
-                project_dir, env_config.server.ssh_key, field="SSH private key"
-            )
-            env_config.server.public_key = _external_file_path(
-                project_dir,
-                env_config.server.public_key,
-                field="SSH public key",
-                secret=False,
-            )
-        else:
-            env_config.monitoring.secrets_file = _project_secret_path(
-                project_dir, env_config.monitoring.secrets_file, field="monitoring secrets"
-            )
-            env_config.server.ssh_key = _project_key_path(
-                project_dir, env_config.server.ssh_key, field="SSH private key"
-            )
-            env_config.server.public_key = _project_key_path(
-                project_dir, env_config.server.public_key, field="SSH public key"
-            )
+        env_config.monitoring.secrets_file = _external_file_path(
+            project_dir, env_config.monitoring.secrets_file, field="monitoring secrets"
+        )
+        env_config.server.ssh_key = _external_file_path(
+            project_dir, env_config.server.ssh_key, field="SSH private key"
+        )
+        env_config.server.public_key = _external_file_path(
+            project_dir,
+            env_config.server.public_key,
+            field="SSH public key",
+            secret=False,
+        )
         _reject_secret_collisions(
             env_config.monitoring.secrets_file,
             {
@@ -275,64 +243,43 @@ def load_configuration(
             },
             field="Monitoring secret",
         )
-        if env_config.schema_version == 2:
-            _set_external_context(project_dir, env_config)
+        _set_external_context(project_dir, env_config)
         return global_config, env_config
     app = env_config.application
     app.compose = _project_application_path(project_dir, app.compose, field="Compose")
-    if env_config.schema_version == 2:
-        app.env_file = _external_file_path(
-            project_dir, app.env_file, field="application environment"
+    app.env_file = _external_file_path(
+        project_dir, app.env_file, field="application environment"
+    )
+    if app.registry_auth_file is not None:
+        app.registry_auth_file = _external_file_path(
+            project_dir, app.registry_auth_file, field="registry authentication"
         )
-        if app.registry_auth_file is not None:
-            app.registry_auth_file = _external_file_path(
-                project_dir, app.registry_auth_file, field="registry authentication"
-            )
-        env_config.server.ssh_key = _external_file_path(
-            project_dir, env_config.server.ssh_key, field="SSH private key"
-        )
-        env_config.server.public_key = _external_file_path(
+    env_config.server.ssh_key = _external_file_path(
+        project_dir, env_config.server.ssh_key, field="SSH private key"
+    )
+    env_config.server.public_key = _external_file_path(
+        project_dir,
+        env_config.server.public_key,
+        field="SSH public key",
+        secret=False,
+    )
+    if env_config.backup is not None:
+        env_config.backup.credentials_file = _external_file_path(
             project_dir,
-            env_config.server.public_key,
-            field="SSH public key",
-            secret=False,
+            env_config.backup.credentials_file,
+            field="backup credentials",
         )
-        if env_config.backup is not None:
-            env_config.backup.credentials_file = _external_file_path(
-                project_dir,
-                env_config.backup.credentials_file,
-                field="backup credentials",
-            )
-            env_config.backup.age_identity_file = _external_file_path(
-                project_dir,
-                env_config.backup.age_identity_file,
-                field="age identity",
-            )
-    else:
-        app.env_file = _project_application_path(
-            project_dir, app.env_file, field="environment file"
-        )
-        if app.registry_auth_file is not None:
-            app.registry_auth_file = _project_secret_path(
-                project_dir, app.registry_auth_file, field="registry authentication"
-            )
-        env_config.server.ssh_key = _project_key_path(
-            project_dir, env_config.server.ssh_key, field="SSH private key"
-        )
-        env_config.server.public_key = _project_key_path(
-            project_dir, env_config.server.public_key, field="SSH public key"
+        env_config.backup.age_identity_file = _external_file_path(
+            project_dir,
+            env_config.backup.age_identity_file,
+            field="age identity",
         )
     if env_config.collector is not None:
-        if env_config.schema_version == 2:
-            env_config.collector.password_file = _external_file_path(
-                project_dir,
-                env_config.collector.password_file,
-                field="collector password",
-            )
-        else:
-            env_config.collector.password_file = _project_secret_path(
-                project_dir, env_config.collector.password_file, field="collector password"
-            )
+        env_config.collector.password_file = _external_file_path(
+            project_dir,
+            env_config.collector.password_file,
+            field="collector password",
+        )
         _reject_secret_collisions(
             env_config.collector.password_file,
             {
@@ -374,8 +321,7 @@ def load_configuration(
             field="Age identity",
         )
     _reject_registry_auth_collisions(project_dir, config_root, env_path, env_config)
-    if env_config.schema_version == 2:
-        _set_external_context(project_dir, env_config)
+    _set_external_context(project_dir, env_config)
     return global_config, env_config
 
 
@@ -440,8 +386,6 @@ def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) 
 def validate_backup_inputs(config: EnvironmentConfig, *, require_identity: bool = False) -> None:
     if config.environment != "prod" or config.backup is None or not config.backup.enabled:
         raise ConfigurationError("Production backup is not enabled")
-    if config.schema_version != 2:
-        raise ConfigurationError("Backup requires schema v2 external secret storage")
     required = [("backup credentials", config.backup.credentials_file)]
     if require_identity:
         required.append(("age identity", config.backup.age_identity_file))
@@ -530,6 +474,7 @@ def validate_compose(config: EnvironmentConfig) -> None:
             raise ConfigurationError(
                 f"Compose service {service_name!r} uses forbidden network_mode/container sharing"
             )
+        _validate_inline_environment(service_name, raw_service.get("environment"))
         _validate_service_networks(service_name, raw_service.get("networks", []), networks)
         _validate_service_volumes(
             service_name,
@@ -560,6 +505,62 @@ def validate_compose(config: EnvironmentConfig) -> None:
                     f"Compose service {service_name!r} publishes forbidden binding "
                     f"{host_ip}:{host_port}; only configured loopback ports are allowed"
                 )
+
+
+_SECRET_ENV_NAME = re.compile(
+    r"(?:^|_)(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_KEY|CREDENTIALS?|AUTH|"
+    r"ACCESS_KEY|BEARER|PAT)(?:_|$)",
+    re.IGNORECASE,
+)
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SECRET_ENV_VALUE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@|"
+    r"\$\{[^}]*?(?:PASSWORD|PASSWD|SECRET|TOKEN|API[_-]?KEY|PRIVATE[_-]?KEY|"
+    r"CREDENTIALS?|AUTH|ACCESS[_-]?KEY|BEARER|PAT)[^}]*\}",
+    re.IGNORECASE,
+)
+
+
+def _validate_inline_environment(service_name: object, environment: object) -> None:
+    """Keep credentials in the external env_file rather than committed Compose YAML."""
+    if environment is None:
+        return
+    entries: list[tuple[str, object]] = []
+    if isinstance(environment, dict):
+        for name, value in environment.items():
+            if not isinstance(name, str):
+                raise ConfigurationError(
+                    f"Compose service {service_name!r} environment keys must be strings"
+                )
+            entries.append((name, value))
+    elif isinstance(environment, list):
+        for item in environment:
+            if not isinstance(item, str):
+                raise ConfigurationError(
+                    f"Compose service {service_name!r} environment list must contain strings"
+                )
+            name, separator, list_value = item.partition("=")
+            entries.append((name, list_value if separator else None))
+    else:
+        raise ConfigurationError(
+            f"Compose service {service_name!r} environment must be a mapping or list"
+        )
+    for name, value in entries:
+        if not _ENVIRONMENT_NAME.fullmatch(name):
+            raise ConfigurationError(
+                f"Compose service {service_name!r} has invalid environment name {name!r}"
+            )
+        if _SECRET_ENV_NAME.search(name):
+            raise ConfigurationError(
+                f"Compose service {service_name!r} declares secret-like environment key "
+                f"{name!r}; keep secrets in the external application env_file"
+            )
+        if isinstance(value, str) and _SECRET_ENV_VALUE.search(value):
+            raise ConfigurationError(
+                f"Compose service {service_name!r} contains a secret-like inline "
+                "environment value; keep secrets in the external application env_file"
+            )
 
 
 def validate_environment_file(config: EnvironmentConfig) -> None:

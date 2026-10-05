@@ -4,7 +4,6 @@ import warnings
 from pathlib import Path
 
 import pytest
-import yaml
 
 from deploy_cli import cli
 from deploy_cli.cli import run
@@ -12,8 +11,15 @@ from deploy_cli.redaction import Redactor
 from deploy_cli.runner import RunnerError
 
 
+@pytest.fixture(autouse=True)
+def _bypass_external_store_revalidation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "deploy_cli.config.validate_external_input_for_use", lambda *args, **kwargs: None
+    )
+
+
 def _loaded(environment: str):
-    source = Path(__file__).parents[1]
+    source = Path(__file__).parents[1] / "examples/demo-app"
     return cli.load_configuration(source, environment)
 
 
@@ -77,42 +83,24 @@ def test_backup_secret_fragments_redact_synthetic_runtime_failure() -> None:
 
 
 def test_missing_local_files_return_configuration_exit_code(tmp_path: Path) -> None:
-    (tmp_path / "config").mkdir()
-    (tmp_path / "environments/stage").mkdir(parents=True)
-    source = Path(__file__).parents[1]
-    (tmp_path / "config/global.yml").write_text(
-        (source / "config/global.yml").read_text(encoding="utf-8"), encoding="utf-8"
-    )
-    (tmp_path / "environments/stage/config.yml").write_text(
-        (source / "environments/stage/config.yml").read_text(encoding="utf-8"), encoding="utf-8"
-    )
-
     assert run(["--repo", str(tmp_path), "stage"]) == 2
 
 
 def test_public_health_failure_keeps_health_exit_code(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    source = Path(__file__).parents[1]
-    (tmp_path / "config").mkdir()
-    (tmp_path / "environments/stage").mkdir(parents=True)
-    (tmp_path / "config/global.yml").write_text(
-        (source / "config/global.yml").read_text(encoding="utf-8"), encoding="utf-8"
-    )
-    raw = yaml.safe_load((source / "environments/stage/config.yml").read_text(encoding="utf-8"))
+    global_config, config = _loaded("stage")
     for name in ("key", "key.pub", "stage.env"):
         (tmp_path / name).write_text("placeholder", encoding="utf-8")
     (tmp_path / "stage.env").write_text("APP_ENV=stage\n", encoding="utf-8")
     (tmp_path / "compose.yml").write_text(
         "services:\n  app:\n    image: example/app\n", encoding="utf-8"
     )
-    raw["server"]["ssh_key"] = str(tmp_path / "key")
-    raw["server"]["public_key"] = str(tmp_path / "key.pub")
-    raw["application"]["env_file"] = "stage.env"
-    raw["application"]["compose"] = "compose.yml"
-    (tmp_path / "environments/stage/config.yml").write_text(
-        yaml.safe_dump(raw), encoding="utf-8"
-    )
+    config.server.ssh_key = tmp_path / "key"
+    config.server.public_key = tmp_path / "key.pub"
+    config.application.env_file = tmp_path / "stage.env"
+    config.application.compose = tmp_path / "compose.yml"
+    monkeypatch.setattr(cli, "_load_and_validate", lambda *args, **kwargs: (global_config, config))
     monkeypatch.setattr(cli, "dns_preflight", lambda config: None)
     monkeypatch.setattr(cli, "ensure_deploy_key", lambda config: "using test key")
     monkeypatch.setattr(

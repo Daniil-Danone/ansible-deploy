@@ -4,8 +4,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from deploy_cli.config import load_configuration
-from deploy_cli.models import BackupConfig
+from deploy_cli.config import load_configuration as _load_configuration
+from deploy_cli.models import BackupConfig, EnvironmentConfig
 from deploy_cli.project import sync_project
 from deploy_cli.runner import RunnerError
 from deploy_cli.workflow import (
@@ -20,8 +20,23 @@ from deploy_cli.workflow import (
 )
 
 
+def load_configuration(repo: Path, environment: str):
+    """Load the shared v2 fixture without opting unrelated tests into registry auth."""
+    global_config, config = _load_configuration(repo, environment)
+    if isinstance(config, EnvironmentConfig):
+        config.application.registry_auth_file = None
+    return global_config, config
+
+
+@pytest.fixture(autouse=True)
+def _bypass_external_store_revalidation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "deploy_cli.config.validate_external_input_for_use", lambda *args, **kwargs: None
+    )
+
+
 def test_repeat_deploy_uses_only_managed_access(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     key = tmp_path / "id_ed25519"
     public_key = tmp_path / "id_ed25519.pub"
@@ -47,7 +62,7 @@ def test_repeat_deploy_uses_only_managed_access(tmp_path: Path) -> None:
     ]
     assert runner.playbook.call_args_list[0].args[1].name == "managed.yml"
     assert runner.playbook.call_args_list[4].kwargs["exit_code"] == 7
-    assert runner.playbook.call_args_list[3].args[2]["app_compose_project"] == "myapp"
+    assert runner.playbook.call_args_list[3].args[2]["app_compose_project"] == "demo-stage"
 
 
 def test_restore_prepares_target_before_import_and_rechecks_health(tmp_path: Path) -> None:
@@ -73,7 +88,6 @@ def test_restore_prepares_target_before_import_and_rechecks_health(tmp_path: Pat
     )
     target_env = tmp_path / "restore.env"
     target_env.write_text("APP_ENV=restore\n", encoding="utf-8")
-    target.schema_version = 1
     target.application.env_file = target_env
     target.application.registry_auth_file = None
     runner = Mock()
@@ -125,7 +139,6 @@ def test_restore_bootstraps_pristine_target_before_application_and_import(tmp_pa
     )
     target_env = tmp_path / "restore.env"
     target_env.write_text("APP_ENV=restore\n", encoding="utf-8")
-    target.schema_version = 1
     target.application.env_file = target_env
     target.application.registry_auth_file = None
     runner = Mock()
@@ -176,7 +189,7 @@ def test_restore_bootstraps_pristine_target_before_application_and_import(tmp_pa
 
 
 def test_restore_rejects_unsafe_backup_id_before_runner_calls() -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, source = load_configuration(repo, "prod")
     _, target_raw = load_configuration(repo, "stage")
     target_raw.environment = "restore"
@@ -202,7 +215,7 @@ def test_restore_rejects_unsafe_backup_id_before_runner_calls() -> None:
 def test_backup_operations_converge_runtime_and_credentials(
     tmp_path: Path, action: str
 ) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "prod")
     credentials = tmp_path / "rclone.conf"
     config.backup = BackupConfig.model_validate(
@@ -231,7 +244,7 @@ def test_backup_operations_converge_runtime_and_credentials(
 
 
 def test_production_uses_separate_compose_project_name(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "prod")
     env = tmp_path / "prod.env"
     registry = tmp_path / "registry.json"
@@ -254,7 +267,7 @@ def test_production_uses_separate_compose_project_name(tmp_path: Path) -> None:
 
 
 def test_dry_run_does_not_mutate_bootstrap_access(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     public_key = tmp_path / "id_ed25519.pub"
     env = tmp_path / "stage.env"
@@ -278,7 +291,7 @@ def test_dry_run_does_not_mutate_bootstrap_access(tmp_path: Path) -> None:
 
 
 def test_password_is_used_only_for_bootstrap_connection(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     key = tmp_path / "key"
@@ -335,7 +348,7 @@ def test_password_is_used_only_for_bootstrap_connection(tmp_path: Path) -> None:
 def test_repeat_deploy_never_falls_back_to_root_even_if_password_was_supplied(
     tmp_path: Path,
 ) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     key = tmp_path / "key"
@@ -365,7 +378,7 @@ def test_repeat_deploy_never_falls_back_to_root_even_if_password_was_supplied(
 
 
 def test_pre_authorized_bootstrap_key_supports_first_deploy(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     env.write_text("APP_ENV=stage\n", encoding="utf-8")
@@ -402,7 +415,7 @@ def test_pre_authorized_bootstrap_key_supports_first_deploy(tmp_path: Path) -> N
 
 
 def test_dry_run_without_managed_access_fails_without_bootstrap_probe(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     env.write_text("APP_ENV=stage\n", encoding="utf-8")
@@ -419,7 +432,7 @@ def test_dry_run_without_managed_access_fails_without_bootstrap_probe(tmp_path: 
 
 
 def test_unreachable_managed_and_bootstrap_access_fails_actionably(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     env.write_text("APP_ENV=stage\n", encoding="utf-8")
@@ -438,7 +451,7 @@ def test_unreachable_managed_and_bootstrap_access_fails_actionably(tmp_path: Pat
 
 
 def test_managed_identity_mismatch_never_falls_back_to_bootstrap(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     env.write_text("APP_ENV=stage\n", encoding="utf-8")
@@ -464,7 +477,7 @@ def test_managed_identity_mismatch_never_falls_back_to_bootstrap(tmp_path: Path)
 def test_claimed_host_with_broken_managed_access_is_never_rebootstrapped(
     tmp_path: Path,
 ) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     env.write_text("APP_ENV=stage\n", encoding="utf-8")
@@ -498,7 +511,7 @@ def test_claimed_host_with_broken_managed_access_is_never_rebootstrapped(
 
 
 def test_dns_preflight_resolves_server_hostname(monkeypatch) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     _, config = load_configuration(repo, "stage")
     config.server.host = "vps.example.net"
 
@@ -513,7 +526,7 @@ def test_dns_preflight_resolves_server_hostname(monkeypatch) -> None:
 
 
 def test_dns_preflight_normalizes_ipv6(monkeypatch) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     _, config = load_configuration(repo, "stage")
     config.server.host = "2001:db8::1"
 
@@ -527,7 +540,7 @@ def test_dns_preflight_normalizes_ipv6(monkeypatch) -> None:
 
 
 def test_inventories_are_namespaced_by_environment(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     _, stage = load_configuration(repo, "stage")
     _, prod = load_configuration(repo, "prod")
 
@@ -539,7 +552,7 @@ def test_inventories_are_namespaced_by_environment(tmp_path: Path) -> None:
 
 
 def test_deployment_checksum_covers_secret_and_compose_inputs(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     _, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     env.write_text("APP_ENV=stage\nVALUE=one\n", encoding="utf-8")
@@ -554,7 +567,7 @@ def test_deployment_checksum_covers_secret_and_compose_inputs(tmp_path: Path) ->
 
 
 def test_failed_public_health_runs_abort_and_keeps_original_exit_code(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     key = tmp_path / "key"
@@ -582,7 +595,7 @@ def test_failed_public_health_runs_abort_and_keeps_original_exit_code(tmp_path: 
 
 
 def test_recovery_failure_keeps_original_exit_code_and_reports_both(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     env = tmp_path / "stage.env"
     key = tmp_path / "key"
@@ -614,7 +627,7 @@ def test_recovery_failure_keeps_original_exit_code_and_reports_both(tmp_path: Pa
 
 
 def test_monitoring_deploy_uses_dedicated_order_without_release_playbooks() -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "monitoring")
     runner = Mock()
 
@@ -633,7 +646,7 @@ def test_monitoring_deploy_uses_dedicated_order_without_release_playbooks() -> N
 
 
 def test_collector_deploy_guards_identity_then_reconciles_and_verifies() -> None:
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "stage")
     runner = Mock()
 

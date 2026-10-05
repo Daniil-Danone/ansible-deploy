@@ -9,7 +9,8 @@ secret fields — нормализованные относительные им
 
 ## Global
 
-`.deploy/config/global.yml` использует schema 1:
+`.deploy/config/global.yml` использует собственную версию формата 1. Это не версия
+deployment environment schema:
 
 ```yaml
 schema_version: 1
@@ -30,7 +31,12 @@ global:
       unattended_upgrades: true
 ```
 
-## Stage/Production schema v2
+## Deployment environments: только schema v2
+
+Stage, Production, Monitoring и Restore принимают только `schema_version: 2`.
+Environment schema 1 больше не поддерживается и отклоняется до изменения ключей,
+файлов, сети или состояния сервера. Версии `global.yml`, `images.yml`,
+`.deploy/template-state.yml` и backup archive — независимые форматы и остаются равны 1.
 
 ```yaml
 schema_version: 2
@@ -90,6 +96,8 @@ Production `backup` задаёт schedule, remote, external `credentials_file`, 
 - named volumes объявлены; bind paths абсолютны и явно разрешены;
 - Production images закреплены `@sha256:...`, `build:` запрещён;
 - `APP_ENV` во внешнем env совпадает с environment.
+- secret-like ключи и значения в Compose `environment` запрещены; credentials должны
+  находиться во внешнем `application.env_file`, указанном только относительным именем.
 
 Неизвестные поля запрещены строгими Pydantic models. Ошибка конфигурации возвращает
 код `2` и не должна включать secret value.

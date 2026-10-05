@@ -19,9 +19,18 @@ from deploy_cli.config import (
 from deploy_cli.models import EnvironmentConfig, GlobalConfig, MonitoringConfig
 from deploy_cli.secret_file import secure_secret_permissions
 
+ROOT = Path(__file__).parents[1]
+DEMO = ROOT / "examples/demo-app"
+FIXTURE = DEMO / ".deploy"
+PROJECT_TEMPLATE = ROOT / "src/deploy_cli/templates/project/.deploy"
+
+
+def _use_test_secret(config: EnvironmentConfig | MonitoringConfig, path: Path) -> None:
+    config.set_external_secret_context(DEMO, path.parent, path.parent, False)
+
 
 def test_checked_in_configuration_has_supported_schema() -> None:
-    repo = Path(__file__).parents[1]
+    repo = DEMO
 
     global_config, environment = load_configuration(repo, "stage")
 
@@ -36,7 +45,7 @@ def test_unknown_environment_is_rejected() -> None:
 
 
 def test_checked_in_monitoring_configuration_is_supported() -> None:
-    repo = Path(__file__).parents[1]
+    repo = DEMO
 
     _, monitoring = load_configuration(repo, "monitoring")
 
@@ -44,8 +53,11 @@ def test_checked_in_monitoring_configuration_is_supported() -> None:
     assert monitoring.monitoring.retention_days == 30
 
 
-def test_monitoring_and_collector_secret_contracts_are_validated(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+def test_monitoring_and_collector_secret_contracts_are_validated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("deploy_cli.config.validate_external_input_for_use", lambda *a, **k: None)
+    repo = DEMO
     _, monitoring = load_configuration(repo, "monitoring")
     monitoring_secret = tmp_path / "monitoring.env"
     monitoring_secret.write_text(
@@ -57,6 +69,7 @@ def test_monitoring_and_collector_secret_contracts_are_validated(tmp_path: Path)
     )
     secure_secret_permissions(monitoring_secret)
     monitoring.monitoring.secrets_file = monitoring_secret
+    _use_test_secret(monitoring, monitoring_secret)
 
     _, stage = load_configuration(repo, "stage")
     collector_secret = tmp_path / "collector.password"
@@ -64,13 +77,14 @@ def test_monitoring_and_collector_secret_contracts_are_validated(tmp_path: Path)
     secure_secret_permissions(collector_secret)
     assert stage.collector is not None
     stage.collector.password_file = collector_secret
+    _use_test_secret(stage, collector_secret)
 
     validate_observability_inputs(monitoring)
     validate_observability_inputs(stage)
 
 
 def test_checked_in_production_configuration_is_isolated() -> None:
-    repo = Path(__file__).parents[1]
+    repo = DEMO
     _, stage = load_configuration(repo, "stage")
     _, prod = load_configuration(repo, "prod")
 
@@ -82,26 +96,33 @@ def test_checked_in_production_configuration_is_isolated() -> None:
 
 
 def test_configuration_environment_mismatch_is_rejected(tmp_path: Path) -> None:
-    source = Path(__file__).parents[1]
-    (tmp_path / "config").mkdir()
-    (tmp_path / "environments/prod").mkdir(parents=True)
-    (tmp_path / "config/global.yml").write_text(
+    source = FIXTURE
+    (tmp_path / ".deploy/config").mkdir(parents=True)
+    (tmp_path / ".deploy/environments/prod").mkdir(parents=True)
+    (tmp_path / ".deploy/project-id").write_text("11111111-1111-4111-8111-111111111111\n")
+    (tmp_path / ".deploy/config/global.yml").write_text(
         (source / "config/global.yml").read_text(encoding="utf-8"), encoding="utf-8"
     )
     raw = yaml.safe_load((source / "environments/prod/config.yml").read_text())
     raw["environment"] = "stage"
-    (tmp_path / "environments/prod/config.yml").write_text(yaml.safe_dump(raw), encoding="utf-8")
+    (tmp_path / ".deploy/environments/prod/config.yml").write_text(
+        yaml.safe_dump(raw), encoding="utf-8"
+    )
 
     with pytest.raises(ConfigurationError, match="mismatch"):
         load_configuration(tmp_path, "prod")
 
 
-def test_env_file_must_match_selected_environment(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+def test_env_file_must_match_selected_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("deploy_cli.config.validate_external_input_for_use", lambda *a, **k: None)
+    repo = DEMO
     _, prod = load_configuration(repo, "prod")
     env_file = tmp_path / "prod.env"
     env_file.write_text("APP_ENV=stage\nSECRET=not-printed\n", encoding="utf-8")
     prod.application.env_file = env_file
+    _use_test_secret(prod, env_file)
 
     with pytest.raises(ConfigurationError, match="does not match") as raised:
         validate_environment_file(prod)
@@ -110,7 +131,7 @@ def test_env_file_must_match_selected_environment(tmp_path: Path) -> None:
 
 
 def test_production_cannot_reuse_stage_runtime() -> None:
-    repo = Path(__file__).parents[1]
+    repo = DEMO
     _, stage = load_configuration(repo, "stage")
     _, prod = load_configuration(repo, "prod")
     prod.application.remote_dir = stage.application.remote_dir
@@ -120,7 +141,7 @@ def test_production_cannot_reuse_stage_runtime() -> None:
 
 
 def test_production_cannot_alias_stage_host(monkeypatch) -> None:
-    repo = Path(__file__).parents[1]
+    repo = DEMO
     _, prod = load_configuration(repo, "prod")
     prod.server.host = "prod-vps.example.com"
 
@@ -139,7 +160,7 @@ def test_production_cannot_alias_stage_host(monkeypatch) -> None:
     ["/", "/srv", "/srv/..", "/srv/app/../other", "/srv//app", "/etc/app", "/srv/app name"],
 )
 def test_unsafe_remote_directory_is_rejected(path: str) -> None:
-    raw = yaml.safe_load((Path(__file__).parents[1] / "environments/stage/config.yml").read_text())
+    raw = yaml.safe_load((FIXTURE / "environments/stage/config.yml").read_text())
     raw["application"]["remote_dir"] = path
 
     with pytest.raises(ValidationError, match="normalized"):
@@ -167,7 +188,7 @@ def test_collector_push_url_rejects_noncanonical_or_credentialed_urls(
     push_url: str,
 ) -> None:
     raw = yaml.safe_load(
-        (Path(__file__).parents[1] / "environments/stage/config.yml").read_text()
+        (FIXTURE / "environments/stage/config.yml").read_text()
     )
     raw["collector"]["push_url"] = push_url
 
@@ -188,7 +209,7 @@ def test_collector_push_url_rejects_noncanonical_or_credentialed_urls(
 )
 def test_collector_push_url_accepts_only_structured_https_authorities(push_url: str) -> None:
     raw = yaml.safe_load(
-        (Path(__file__).parents[1] / "environments/stage/config.yml").read_text()
+        (FIXTURE / "environments/stage/config.yml").read_text()
     )
     raw["collector"]["push_url"] = push_url
 
@@ -209,7 +230,7 @@ def test_managed_remote_directories_reject_system_roots(
     field: str, remote_dir: str
 ) -> None:
     raw = yaml.safe_load(
-        (Path(__file__).parents[1] / "environments/stage/config.yml").read_text()
+        (FIXTURE / "environments/stage/config.yml").read_text()
     )
     raw[field]["remote_dir"] = remote_dir
 
@@ -229,7 +250,7 @@ def test_collector_remote_directory_cannot_overlap_application(
     app_dir: str, collector_dir: str
 ) -> None:
     raw = yaml.safe_load(
-        (Path(__file__).parents[1] / "environments/stage/config.yml").read_text()
+        (FIXTURE / "environments/stage/config.yml").read_text()
     )
     raw["application"]["remote_dir"] = app_dir
     raw["collector"]["remote_dir"] = collector_dir
@@ -243,7 +264,7 @@ def test_monitoring_remote_directory_requires_dedicated_opt_or_srv_leaf(
     remote_dir: str,
 ) -> None:
     raw = yaml.safe_load(
-        (Path(__file__).parents[1] / "environments/monitoring/config.yml").read_text()
+        (FIXTURE / "environments/monitoring/config.yml").read_text()
     )
     raw["monitoring"]["remote_dir"] = remote_dir
 
@@ -252,7 +273,7 @@ def test_monitoring_remote_directory_requires_dedicated_opt_or_srv_leaf(
 
 
 def test_unknown_timezone_is_rejected() -> None:
-    raw = yaml.safe_load((Path(__file__).parents[1] / "config/global.yml").read_text())
+    raw = yaml.safe_load((FIXTURE / "config/global.yml").read_text())
     raw["global"]["security_updates"]["reboot"]["timezone"] = "Mars/Olympus"
 
     with pytest.raises(ValidationError, match="IANA"):
@@ -260,15 +281,18 @@ def test_unknown_timezone_is_rejected() -> None:
 
 
 def test_unsafe_linux_user_is_rejected() -> None:
-    raw = yaml.safe_load((Path(__file__).parents[1] / "environments/stage/config.yml").read_text())
+    raw = yaml.safe_load((FIXTURE / "environments/stage/config.yml").read_text())
     raw["server"]["deploy_user"] = "deploy;id"
 
     with pytest.raises(ValidationError, match="safe Linux"):
         EnvironmentConfig.model_validate(raw)
 
 
-def test_portable_registry_auth_is_accepted_for_compose_registry(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+def test_portable_registry_auth_is_accepted_for_compose_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("deploy_cli.config.validate_external_input_for_use", lambda *a, **k: None)
+    repo = DEMO
     _, config = load_configuration(repo, "stage")
     compose = tmp_path / "compose.yml"
     compose.write_text(
@@ -281,6 +305,7 @@ def test_portable_registry_auth_is_accepted_for_compose_registry(tmp_path: Path)
     secure_secret_permissions(auth)
     config.application.compose = compose
     config.application.registry_auth_file = auth
+    _use_test_secret(config, auth)
 
     validate_registry_auth(config)
 
@@ -299,13 +324,18 @@ def test_portable_registry_auth_is_accepted_for_compose_registry(tmp_path: Path)
     ],
 )
 def test_nonportable_registry_auth_is_rejected_without_secret_disclosure(
-    tmp_path: Path, document: dict[str, object], message: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    document: dict[str, object],
+    message: str,
 ) -> None:
-    repo = Path(__file__).parents[1]
+    monkeypatch.setattr("deploy_cli.config.validate_external_input_for_use", lambda *a, **k: None)
+    repo = DEMO
     _, config = load_configuration(repo, "stage")
     auth = tmp_path / "registry-auth.json"
     auth.write_text(json.dumps(document), encoding="utf-8")
     config.application.registry_auth_file = auth
+    _use_test_secret(config, auth)
 
     with pytest.raises(ConfigurationError, match=message) as raised:
         validate_registry_auth(config)
@@ -313,60 +343,149 @@ def test_nonportable_registry_auth_is_rejected_without_secret_disclosure(
     assert "not base64" not in str(raised.value)
 
 
-def test_registry_auth_for_unrelated_compose_host_is_rejected(tmp_path: Path) -> None:
-    repo = Path(__file__).parents[1]
+def test_registry_auth_for_unrelated_compose_host_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("deploy_cli.config.validate_external_input_for_use", lambda *a, **k: None)
+    repo = DEMO
     _, config = load_configuration(repo, "stage")
     auth = tmp_path / "registry-auth.json"
     encoded = base64.b64encode(b"octocat:token").decode()
     auth.write_text(json.dumps({"auths": {"registry.example.com": {"auth": encoded}}}))
     config.application.registry_auth_file = auth
+    _use_test_secret(config, auth)
 
     with pytest.raises(ConfigurationError, match="host not used"):
         validate_registry_auth(config)
 
 
+@pytest.mark.parametrize("environment", ["stage", "prod", "monitoring", "restore"])
+def test_schema_v1_environment_is_rejected_before_external_store_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environment: str
+) -> None:
+    source = DEMO
+    project = tmp_path / "demo"
+    shutil.copytree(source, project)
+    path = project / f".deploy/environments/{environment}/config.yml"
+    if environment == "restore":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((PROJECT_TEMPLATE / "environments/restore/config.yml").read_bytes())
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = 1
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    touched = False
+
+    def external_store(*args, **kwargs):
+        nonlocal touched
+        del args, kwargs
+        touched = True
+        raise AssertionError("external store must not be accessed")
+
+    monkeypatch.setattr("deploy_cli.config.external_secret_location", external_store)
+
+    with pytest.raises(ConfigurationError, match="only schema_version: 2 is supported"):
+        load_configuration(project, environment)
+    assert not touched
+
+
+def test_legacy_root_layout_is_not_used_when_dot_deploy_is_missing(tmp_path: Path) -> None:
+    project = tmp_path / "legacy-project"
+    shutil.copytree(FIXTURE / "config", project / "config")
+    shutil.copytree(FIXTURE / "environments", project / "environments")
+    stage = project / "environments/stage/config.yml"
+    raw = yaml.safe_load(stage.read_text(encoding="utf-8"))
+    raw["schema_version"] = 1
+    stage.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=r"Invalid configuration .*\.deploy"):
+        load_configuration(project, "stage")
+
+
 @pytest.mark.parametrize(
-    "collision",
+    "environment",
     [
-        "deploy/compose.stage.yml",
-        "environments/stage/app.env",
-        "keys/stage_ed25519",
-        "keys/stage_ed25519.pub",
-        ".deploy/images.yml",
-        ".deploy/environments/stage/config.yml",
-        "README.md",
+        {"POSTGRES_PASSWORD": "inline"},
+        ["API_TOKEN=inline"],
+        {"DATABASE_URL": "postgresql://user:password@db/app"},
+        {"UPSTREAM": "${SERVICE_SECRET}"},
+        {"UPSTREAM": "${AWS_ACCESS_KEY_ID}"},
+        {"UPSTREAM": "${AUTH_BEARER}"},
+        {"UPSTREAM": "${GITHUB_PAT}"},
     ],
 )
-def test_registry_auth_cannot_collide_with_project_inputs(
-    tmp_path: Path, collision: str
+def test_compose_rejects_inline_secret_like_environment(
+    tmp_path: Path, environment: object
 ) -> None:
-    source = Path(__file__).parents[1] / "examples/demo-app"
-    project = tmp_path / "demo"
-    shutil.copytree(source, project)
-    path = project / ".deploy/environments/stage/config.yml"
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    raw["schema_version"] = 1
-    raw["application"]["registry_auth_file"] = collision
-    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-
-    with pytest.raises(ConfigurationError, match="collides with protected"):
-        load_configuration(project, "stage")
-
-
-@pytest.mark.parametrize("absolute", [False, True])
-def test_registry_auth_must_stay_inside_project(tmp_path: Path, absolute: bool) -> None:
-    source = Path(__file__).parents[1] / "examples/demo-app"
-    project = tmp_path / "demo"
-    shutil.copytree(source, project)
-    path = project / ".deploy/environments/stage/config.yml"
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    raw["schema_version"] = 1
-    raw["application"]["registry_auth_file"] = (
-        str((tmp_path.parent / "outside-secret.json").resolve())
-        if absolute
-        else "../secret.json"
+    _, config = load_configuration(DEMO, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        yaml.safe_dump({"services": {"app": {"environment": environment}}}),
+        encoding="utf-8",
     )
-    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    config.application.compose = compose
 
-    with pytest.raises(ConfigurationError, match="inside the project"):
-        load_configuration(project, "stage")
+    with pytest.raises(ConfigurationError, match="secret-like"):
+        validate_compose(config)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {1: "value"},
+        ["=value"],
+        ["BAD-NAME=value"],
+    ],
+)
+def test_compose_rejects_invalid_environment_names(
+    tmp_path: Path, environment: object
+) -> None:
+    _, config = load_configuration(DEMO, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        yaml.safe_dump({"services": {"app": {"environment": environment}}}),
+        encoding="utf-8",
+    )
+    config.application.compose = compose
+
+    with pytest.raises(ConfigurationError, match="environment keys|invalid environment name"):
+        validate_compose(config)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["APIKEY", "AWS_ACCESS_KEY_ID", "AUTH_BEARER", "GITHUB_PAT"],
+)
+def test_compose_rejects_additional_secret_environment_names(
+    tmp_path: Path, name: str
+) -> None:
+    _, config = load_configuration(DEMO, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        yaml.safe_dump({"services": {"app": {"environment": {name: "inline"}}}}),
+        encoding="utf-8",
+    )
+    config.application.compose = compose
+
+    with pytest.raises(ConfigurationError, match="secret-like"):
+        validate_compose(config)
+
+
+def test_compose_accepts_non_secret_inline_environment(tmp_path: Path) -> None:
+    _, config = load_configuration(DEMO, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "app": {
+                        "image": "example/app",
+                        "environment": {"APP_ENV": "stage", "LOG_LEVEL": "info"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config.application.compose = compose
+
+    validate_compose(config)

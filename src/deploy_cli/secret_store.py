@@ -479,13 +479,25 @@ def ensure_external_parent_for_write(
         current /= part
         if current.exists():
             continue
+        created = False
         try:
             # Python gives mode=0700 special ACL semantics on modern Windows;
             # inherit the already-private parent first, then install our one-ACE DACL.
             current.mkdir(mode=0o777 if os.name == "nt" else 0o700)
-            secure_secret_permissions(current)
+            created = True
+        except FileExistsError:
+            # Another process may have created the same protected path after exists().
+            # The ancestry validation below verifies its type, owner and permissions.
+            pass
         except (OSError, SecretFileError):
             raise SecretStoreError("Unable to create protected external directory") from None
+        if created:
+            try:
+                secure_secret_permissions(current)
+            except (OSError, SecretFileError):
+                raise SecretStoreError(
+                    "Unable to create protected external directory"
+                ) from None
 
     validate_external_root_ancestry(location, require_root=True)
     parent_location = ExternalSecretLocation(path.parent, root, True)

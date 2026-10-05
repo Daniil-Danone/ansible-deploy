@@ -15,10 +15,10 @@ def _yaml(path: str) -> list[dict[str, object]]:
     return document
 
 
-def test_fixture_only_binds_upstream_to_loopback() -> None:
-    compose = yaml.safe_load(_text("environments/stage/docker-compose.yml"))
+def test_demo_frontend_binds_upstream_to_loopback() -> None:
+    compose = yaml.safe_load(_text("examples/demo-app/deploy/compose.stage.yml"))
 
-    assert compose["services"]["fixture"]["ports"] == ["127.0.0.1:8080:80"]
+    assert compose["services"]["frontend"]["ports"] == ["127.0.0.1:8080:8080"]
 
 
 def test_reboot_is_marker_conditional_and_uses_moscow_calendar() -> None:

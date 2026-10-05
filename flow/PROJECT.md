@@ -32,7 +32,7 @@ Production.
 # линтер
 python -m ruff check .
 yamllint .
-ansible-lint ansible
+ANSIBLE_ROLES_PATH=src/deploy_cli/runtime/ansible/roles ansible-lint src/deploy_cli/runtime/ansible
 
 # типы
 python -m mypy
@@ -45,7 +45,7 @@ python -m pytest -o addopts= -q tests/<module>.py
 
 # сборка
 python -m build
-docker build -t ansible-deploy:local .
+docker build -t ansible-deploy:local src/deploy_cli/runtime
 
 # инфраструктурные контракты
 make syntax-check
@@ -63,7 +63,7 @@ git diff --check
 ## Слои и зависимости
 
 `cli -> config/models -> workflow -> runner -> packaged Ansible runtime`.
-Корневой `ansible/` обязан быть идентичен `src/deploy_cli/runtime/ansible/`.
+Ansible runtime живёт только в `src/deploy_cli/runtime/` — корневых копий нет.
 Application release, monitoring и backup workflows не смешивают транзакции и
 rollback semantics.
 
@@ -75,7 +75,7 @@ rollback semantics.
 | Зона | Пути |
 |---|---|
 | секреты / крипто | `src/deploy_cli/config.py`, `src/deploy_cli/keys.py`, `src/deploy_cli/images.py`, `src/deploy_cli/runner.py`, `src/deploy_cli/secret_store.py`, `environments/`, `examples/` |
-| фон / очереди / интеграции | `ansible/roles/backup/`, `ansible/playbooks/backup*.yml`, `.github/workflows/` |
+| фон / очереди / интеграции | `src/deploy_cli/runtime/ansible/roles/backup/`, `src/deploy_cli/runtime/ansible/playbooks/backup*.yml`, `.github/workflows/` |
 | публичная граница | `src/deploy_cli/cli.py`, `src/deploy_cli/models.py` |
 
 ## Стайлгайды

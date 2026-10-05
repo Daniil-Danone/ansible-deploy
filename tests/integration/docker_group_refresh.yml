@@ -17,7 +17,7 @@
         that: "'docker' not in groups_before.stdout.split()"
 
     - name: Apply production Docker access tasks
-      ansible.builtin.include_tasks: ../../ansible/roles/docker/tasks/access.yml
+      ansible.builtin.include_tasks: ../../src/deploy_cli/runtime/ansible/roles/docker/tasks/access.yml
 
     - name: Read refreshed deployment account groups
       ansible.builtin.command: id -Gn

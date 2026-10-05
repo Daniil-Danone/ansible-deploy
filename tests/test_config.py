@@ -407,10 +407,6 @@ def test_legacy_root_layout_is_not_used_when_dot_deploy_is_missing(tmp_path: Pat
         {"POSTGRES_PASSWORD": "inline"},
         ["API_TOKEN=inline"],
         {"DATABASE_URL": "postgresql://user:password@db/app"},
-        {"UPSTREAM": "${SERVICE_SECRET}"},
-        {"UPSTREAM": "${AWS_ACCESS_KEY_ID}"},
-        {"UPSTREAM": "${AUTH_BEARER}"},
-        {"UPSTREAM": "${GITHUB_PAT}"},
     ],
 )
 def test_compose_rejects_inline_secret_like_environment(
@@ -489,6 +485,103 @@ def test_compose_accepts_non_secret_inline_environment(tmp_path: Path) -> None:
     config.application.compose = compose
 
     validate_compose(config)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"UPSTREAM": "${SERVICE_SECRET}"},
+        {"UPSTREAM": "${AWS_ACCESS_KEY_ID}"},
+        {"UPSTREAM": "${AUTH_BEARER}"},
+        {"UPSTREAM": "${GITHUB_PAT}"},
+        {"POSTGRES_PASSWORD": "${DB_PASSWORD}"},
+        {"REDIS_PASSWORD": "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"},
+        {"BOT_WEBHOOK_URL": "${BOT_PUBLIC_URL:?BOT_PUBLIC_URL is required}/bot"},
+        {"DSN": "${DB_PASSWORD}"},
+        {"POSTGRES_DB": "${DB_NAME:-uwords}"},
+        {"BOT_ADMIN_CHAT_ID": "${BOT_ADMIN_CHAT_ID:-0}"},
+        {"BOT_LINK": "${BOT_LINK:-}"},
+    ],
+)
+def test_compose_accepts_environment_references_to_external_env_file(
+    tmp_path: Path, environment: object
+) -> None:
+    _, config = load_configuration(DEMO, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        yaml.safe_dump(
+            {"services": {"app": {"image": "example/app", "environment": environment}}}
+        ),
+        encoding="utf-8",
+    )
+    config.application.compose = compose
+
+    validate_compose(config)
+
+
+def test_compose_rejects_interpolation_default_value(tmp_path: Path) -> None:
+    _, config = load_configuration(DEMO, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "app": {"environment": {"POSTGRES_PASSWORD": "${DB_PASSWORD:-hunter2}"}}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config.application.compose = compose
+
+    with pytest.raises(ConfigurationError, match="default value is committed") as failure:
+        validate_compose(config)
+    assert "hunter2" not in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"POSTGRES_PASSWORD": "pre${DB_PASSWORD}"},
+        ["POSTGRES_PASSWORD"],
+    ],
+)
+def test_compose_rejects_literal_part_under_secret_environment_key(
+    tmp_path: Path, environment: object
+) -> None:
+    _, config = load_configuration(DEMO, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        yaml.safe_dump({"services": {"app": {"environment": environment}}}),
+        encoding="utf-8",
+    )
+    config.application.compose = compose
+
+    with pytest.raises(ConfigurationError, match="secret-like"):
+        validate_compose(config)
+
+
+def test_compose_rejects_private_key_in_literal_environment_part(tmp_path: Path) -> None:
+    _, config = load_configuration(DEMO, "stage")
+    compose = tmp_path / "compose.yml"
+    compose.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "app": {
+                        "environment": {
+                            "TLS_MATERIAL": "${PREFIX}-----BEGIN RSA PRIVATE KEY-----MIIB"
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config.application.compose = compose
+
+    with pytest.raises(ConfigurationError, match="secret-like inline"):
+        validate_compose(config)
 
 
 def test_reverse_proxy_defaults_reproduce_nginx_builtins() -> None:

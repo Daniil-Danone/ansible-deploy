@@ -36,6 +36,7 @@ _MONITORING_REQUIRED = (
     "LOKI_PUSH_USERNAME",
     "LOKI_PUSH_PASSWORD_HASH",
 )
+_NO_TEMPLATE = "no template; add the service variables"
 
 
 def _relative_name(location: ExternalSecretLocation, path: Path) -> str:
@@ -59,13 +60,25 @@ def _ensure_directory(project_dir: Path, location: ExternalSecretLocation, relat
     return existed
 
 
+def _declared_secret_files(
+    config: EnvironmentConfig | MonitoringConfig,
+) -> list[Path]:
+    """Secret files the configuration names but no ``.env.example`` describes."""
+    if not isinstance(config, EnvironmentConfig):
+        return []
+    declared = [item.source for item in config.application.extra_env_files]
+    if config.collector is not None:
+        declared.append(config.collector.password_file)
+    return declared
+
+
 def _ensure_template(
     project_dir: Path,
     location: ExternalSecretLocation,
     target: Path,
-    example: Path,
+    content: bytes,
 ) -> tuple[bool, bytes]:
-    """Create the secret file from ``.env.example`` once, never touching an existing one."""
+    """Create the secret file once, never touching an existing one."""
     ensure_external_parent_for_write(
         project_dir,
         location.root,
@@ -78,7 +91,6 @@ def _ensure_template(
             return True, target.read_bytes()
         except OSError:
             raise SecretStoreError("Unable to read an existing external secret file") from None
-    content = example.read_bytes()
     try:
         descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -134,6 +146,15 @@ def initialize_secret_store(project_dir: Path, environment: str = "all") -> int:
         (existing if _ensure_directory(project_dir, location, directory) else created).append(
             f"{directory}/"
         )
+        # Files the configuration declares but no template describes: per-service
+        # env files and the collector password. Created empty and reported, so the
+        # deployment does not fail later on a file nobody knew to create.
+        for source in _declared_secret_files(config):
+            relative = _relative_name(location, source)
+            already, _ = _ensure_template(project_dir, location, source, b"")
+            (existing if already else created).append(relative)
+            if not already:
+                pending.append((relative, [_NO_TEMPLATE]))
         example = project_dir / f".deploy/environments/{name}/.env.example"
         if not example.is_file():
             continue
@@ -148,7 +169,9 @@ def initialize_secret_store(project_dir: Path, environment: str = "all") -> int:
         else:  # pragma: no cover - defensive: only two configuration kinds exist
             continue
         relative = _relative_name(location, target)
-        already, content = _ensure_template(project_dir, location, target, example)
+        already, content = _ensure_template(
+            project_dir, location, target, example.read_bytes()
+        )
         (existing if already else created).append(relative)
         if not already:
             variables = _pending_variables(content, required)

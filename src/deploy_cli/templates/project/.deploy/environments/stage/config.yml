@@ -8,7 +8,8 @@ server:
   deploy_user: deploy
   ssh_key: keys/stage_ed25519
   public_key: keys/stage_ed25519.pub
-  host_key_fingerprints: [SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]
+  # Filled by `ansible-deploy trust stage`; empty means the host is not trusted yet.
+  host_key_fingerprints: []
 application:
   compose: deploy/compose.stage.yml
   env_file: environments/stage/app.env

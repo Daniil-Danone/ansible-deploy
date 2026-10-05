@@ -28,7 +28,9 @@ from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig, is_backup
 from .project import ProjectError, ProjectSyncResult, sync_project
 from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
+from .secret_setup import SECRET_ENVIRONMENTS, hash_password, initialize_secret_store
 from .secret_store import SecretStoreError, create_project_id, external_secret_root
+from .trust import TRUST_ENVIRONMENTS, trust_environment
 from .workflow import (
     backup_operation,
     collector_status,
@@ -142,6 +144,19 @@ def _parser() -> argparse.ArgumentParser:
         )
         if environment == "prod":
             deploy_parser.add_argument("--yes", action="store_true")
+    trust = sub.add_parser("trust", help="Scan and record an environment's SSH host key")
+    trust.add_argument("environment", choices=list(TRUST_ENVIRONMENTS))
+    trust.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="only print the scanned fingerprints, never write the configuration",
+    )
+    trust.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite fingerprints that no longer match the scanned host key",
+    )
     status_parser = sub.add_parser("status", help="Check public environment health")
     status_parser.add_argument("environment", choices=["stage", "prod"])
     monitoring = sub.add_parser("monitoring", help="Manage Grafana and Loki")
@@ -186,6 +201,18 @@ def _parser() -> argparse.ArgumentParser:
         "--new-project-id",
         action="store_true",
         help="create or replace .deploy/project-id without copying secrets",
+    )
+    secrets_init = secrets_sub.add_parser(
+        "init", help="Create the external store layout and secret file templates"
+    )
+    secrets_init.add_argument(
+        "environment",
+        nargs="?",
+        default="all",
+        choices=[*SECRET_ENVIRONMENTS, "all"],
+    )
+    secrets_sub.add_parser(
+        "hash-password", help="Hash a password with crypt SHA-512 for monitoring"
     )
     backup = sub.add_parser("backup", help="Manage encrypted Production backups")
     backup_sub = backup.add_subparsers(dest="backup_command", required=True)
@@ -353,7 +380,19 @@ def run(argv: list[str] | None = None) -> int:
             )
             _print_project_result(result)
             return 1 if result.conflicts or (result.check and result.changes_required) else 0
+        if args.command == "trust":
+            return trust_environment(
+                project_dir,
+                args.environment,
+                verbose=args.verbose,
+                print_only=args.print_only,
+                force=args.force,
+            )
         if args.command == "secrets":
+            if args.secrets_command == "init":
+                return initialize_secret_store(project_dir, args.environment)
+            if args.secrets_command == "hash-password":
+                return hash_password(project_dir, verbose=args.verbose)
             if args.new_project_id:
                 create_project_id(project_dir)
             print(external_secret_root(project_dir))

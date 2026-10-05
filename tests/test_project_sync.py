@@ -7,7 +7,7 @@ import yaml
 from deploy_cli import cli
 from deploy_cli.config import load_configuration
 from deploy_cli.models import EnvironmentConfig
-from deploy_cli.project import STATE_PATH, sync_project
+from deploy_cli.project import SCAFFOLD_VERSION, STATE_PATH, sync_project
 
 
 def test_init_is_idempotent_and_creates_all_environment_skeletons(tmp_path: Path) -> None:
@@ -168,7 +168,7 @@ def test_state_records_version_and_installed_hashes(tmp_path: Path) -> None:
     state = yaml.safe_load((tmp_path / STATE_PATH).read_text(encoding="utf-8"))
 
     assert state["schema_version"] == 1
-    assert state["template_version"] == 1
+    assert state["template_version"] == SCAFFOLD_VERSION
     for relative, digest in state["files"].items():
         assert hashlib.sha256((tmp_path / relative).read_bytes()).hexdigest() == digest
 

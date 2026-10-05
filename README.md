@@ -13,6 +13,8 @@ ansible-deploy --version
 cd /path/to/application
 ansible-deploy project init
 ansible-deploy secrets path
+ansible-deploy secrets init
+ansible-deploy trust stage
 ansible-deploy images publish stage --registry ghcr --namespace OWNER --ask-token
 ansible-deploy stage
 ansible-deploy status stage
@@ -24,7 +26,8 @@ CLI ставится глобально через [uv](https://docs.astral.sh/u
 Обновление, установка из wheel релиза и pipx — в [руководстве по обновлению](docs/guides/upgrading.md).
 Старое имя команды `deploy` остаётся алиасом `ansible-deploy`.
 
-После `project init` замените example host/domain/fingerprint и Compose. Реальные
+После `project init` замените example host/domain и Compose; fingerprint SSH host key
+записывает `ansible-deploy trust <environment>`. Реальные
 `app.env`, registry credentials, SSH private keys, backup credentials и age identity
 создавайте только во внешнем каталоге, который печатает `ansible-deploy secrets path`.
 `.deploy/` целиком предназначен для commit-safe конфигурации.

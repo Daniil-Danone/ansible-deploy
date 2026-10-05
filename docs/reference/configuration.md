@@ -48,7 +48,8 @@ server:
   deploy_user: deploy
   ssh_key: keys/stage_ed25519
   public_key: keys/stage_ed25519.pub
-  host_key_fingerprints: [SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]
+  # Filled by `ansible-deploy trust stage`; empty means the host is not trusted yet.
+  host_key_fingerprints: []
 application:
   compose: deploy/compose.stage.yml
   env_file: environments/stage/app.env
@@ -60,6 +61,11 @@ domain: stage.example.com
 acme_email: ops@example.com
 health_path: /health
 ```
+
+`server.host_key_fingerprints` необязателен и по умолчанию пуст: это значит «host ещё
+не доверен». Список заполняет `ansible-deploy trust <environment>`; руками его вписывать
+не нужно. Непустые элементы обязаны иметь формат OpenSSH `SHA256:` + 43 base64-символа.
+Пока список пуст, операции с сервером останавливаются с кодом `2`.
 
 `application.compose` — project-relative commit-safe file. Secret fields `env_file` и
 `registry_auth_file`, а также server key names резолвятся относительно внешнего root.

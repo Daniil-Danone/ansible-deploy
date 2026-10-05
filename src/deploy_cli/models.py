@@ -151,7 +151,8 @@ class ServerConfig(StrictModel):
     deploy_user: str = "deploy"
     ssh_key: Path
     public_key: Path
-    host_key_fingerprints: list[str] = Field(min_length=1)
+    # Empty means "not trusted yet": ``ansible-deploy trust <environment>`` fills it in.
+    host_key_fingerprints: list[str] = Field(default_factory=list)
 
     @field_validator("ssh_key", "public_key", mode="before")
     @classmethod

@@ -169,8 +169,13 @@ Production `backup` задаёт schedule, remote, external `credentials_file`, 
 - named volumes объявлены; bind paths абсолютны и явно разрешены;
 - Production images закреплены `@sha256:...`, `build:` запрещён;
 - `APP_ENV` во внешнем env совпадает с environment.
-- secret-like ключи и значения в Compose `environment` запрещены; credentials должны
-  находиться во внешнем `application.env_file`, указанном только относительным именем.
+- в Compose `environment` допустимы только ссылки на переменные внешнего env-файла —
+  `${NAME}` или `${NAME:?message}` — включая переменные с secret-like именами
+  (`POSTGRES_PASSWORD: ${DB_PASSWORD}` разрешён); запрещены литеральные secrets под
+  secret-like ключом, значения по умолчанию у интерполяций (`${NAME:-value}`,
+  `${NAME:+value}`) и встроенные credentials (private key, `scheme://user:pass@host`)
+  в литеральной части. Сами значения находятся во внешнем `application.env_file`,
+  указанном только относительным именем.
 - service `env_file` (строка, список или длинная форма `- path: x` с optional boolean
   `required`) может ссылаться только на `.env` или объявленный
   `application.extra_env_files[].target`; другие пути отклоняются.

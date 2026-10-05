@@ -561,17 +561,21 @@ _SECRET_ENV_NAME = re.compile(
     re.IGNORECASE,
 )
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A reference resolves at container start from the external env file, so it never
+# carries secret material in the repository.
+_ENV_REFERENCE = re.compile(
+    r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::(?:\?[^}]*|[-+]))?\}|\$[A-Za-z_][A-Za-z0-9_]*"
+)
+# A non-empty interpolation default would embed the fallback value in the commit.
+_ENV_DEFAULT_VALUE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:[-+][^}]+\}")
 _SECRET_ENV_VALUE = re.compile(
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
-    r"[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@|"
-    r"\$\{[^}]*?(?:PASSWORD|PASSWD|SECRET|TOKEN|API[_-]?KEY|PRIVATE[_-]?KEY|"
-    r"CREDENTIALS?|AUTH|ACCESS[_-]?KEY|BEARER|PAT)[^}]*\}",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
     re.IGNORECASE,
 )
 
 
 def _validate_inline_environment(service_name: object, environment: object) -> None:
-    """Keep credentials in the external env_file rather than committed Compose YAML."""
+    """Allow references to the external env_file, never committed secret material."""
     if environment is None:
         return
     entries: list[tuple[str, object]] = []
@@ -599,12 +603,21 @@ def _validate_inline_environment(service_name: object, environment: object) -> N
             raise ConfigurationError(
                 f"Compose service {service_name!r} has invalid environment name {name!r}"
             )
-        if _SECRET_ENV_NAME.search(name):
+        if isinstance(value, str) and _ENV_DEFAULT_VALUE.search(value):
+            raise ConfigurationError(
+                f"Compose service {service_name!r} sets a default value in the "
+                f"interpolation for {name!r}; a default value is committed with the "
+                "Compose file, so only ${NAME}, ${NAME:?message}, ${NAME:-} and "
+                "${NAME:+} are allowed"
+            )
+        literal = _ENV_REFERENCE.sub("", value) if isinstance(value, str) else None
+        if _SECRET_ENV_NAME.search(name) and literal != "":
             raise ConfigurationError(
                 f"Compose service {service_name!r} declares secret-like environment key "
-                f"{name!r}; keep secrets in the external application env_file"
+                f"{name!r} with a literal value; reference the external application "
+                "env_file variable instead, as in ${NAME}"
             )
-        if isinstance(value, str) and _SECRET_ENV_VALUE.search(value):
+        if literal is not None and _SECRET_ENV_VALUE.search(literal):
             raise ConfigurationError(
                 f"Compose service {service_name!r} contains a secret-like inline "
                 "environment value; keep secrets in the external application env_file"

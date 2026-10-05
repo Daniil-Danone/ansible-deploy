@@ -12,6 +12,9 @@ deploy [--project-dir PATH] [--verbose] COMMAND ...
 deploy project init
 deploy project sync [--check]
 deploy secrets path [--new-project-id]
+deploy secrets init [<stage|prod|monitoring|restore|all>]
+deploy secrets hash-password
+deploy trust <stage|prod|monitoring|restore> [--print] [--force]
 deploy images publish <stage|prod> ...
 deploy stage [--dry-run] [--version SHA] [--allow-volume-change NAME ...]
 deploy prod [--dry-run] [--version SHA] [--yes] [--allow-volume-change NAME ...]
@@ -39,6 +42,41 @@ non-interactive protected CI используется `--yes`.
 останавливается до изменения контейнеров, если набор named volumes не совпадает с
 активным release и существующими Docker volumes — см.
 [непрерывность named volumes](../concepts/server-state.md#непрерывность-named-volumes).
+
+## Доверие SSH host key
+
+`trust <environment>` сканирует host key сервера из config этого окружения
+(`server.host`, `server.ssh_port`), печатает по строке `[FINGERPRINT] <тип ключа>
+SHA256:...` и записывает значения в `server.host_key_fingerprints` файла
+`.deploy/environments/<environment>/config.yml`. Переписывается только этот блок,
+остальной файл остаётся байт-в-байт.
+
+- список совпадает с просканированным — `[OK] ... unchanged`, код `0`;
+- список пуст — записывается, код `0`;
+- список непустой и отличается — файл не меняется, код `2`: сервер либо переустановлен,
+  либо соединение перехвачено. Сверьте ключ с консолью провайдера и повторите с `--force`;
+- `--print` печатает fingerprint'ы и ничего не пишет;
+- `--force` перезаписывает расхождение.
+
+Пока `host_key_fingerprints` пуст, deploy, update, rollback, monitoring, collectors и
+backup останавливаются до обращения к серверу с кодом `2` и подсказкой запустить
+`ansible-deploy trust <environment>`. Scan недоступен — код `4`, несовпадение или смена
+ключа у уже доверенного окружения — код `3`.
+
+## Внешние секреты
+
+`secrets path` печатает project-scoped root. `secrets init [<environment>|all]`
+(по умолчанию `all`) создаёт в нём owner-only `environments/<env>/`, `keys/`, `backup/` и
+заготовку secret-файла из закоммиченного `.deploy/environments/<env>/.env.example` под
+именем из `application.env_file` (для monitoring — `monitoring.secrets_file`).
+Существующий файл не перезаписывается и его права не меняются. Отчёт печатает
+`[CREATE]`, `[KEEP]` и `[FILL] <файл>: <переменные>` — пустые значения заготовки и
+`required_env_vars`, которых в ней нет. Команда идемпотентна и печатает только имена
+переменных и относительные имена файлов.
+
+`secrets hash-password` дважды скрыто запрашивает пароль, считает crypt SHA-512 внутри
+runtime-контейнера (`openssl passwd -6`) и печатает в stdout только итоговый хеш; пароль
+не попадает в argv, вывод и на диск. Несовпадение паролей — код `2`.
 
 Код `0` означает доказанный успех команды, `2` — configuration/security boundary;
 runner возвращает ненулевой код underlying operation. Не анализируйте только текст:

@@ -5,7 +5,7 @@
    получает digest из push и проверяет immutable `repository@digest` через registry.
 3. Только после успеха всех images Compose атомарно обновляется под lock.
 4. Deploy проверяет, что DNS domain и server имеют общий реальный IP.
-5. `ssh-keyscan` сверяется с fingerprint из доверенной консоли и сохранённым
+5. `ssh-keyscan` сверяется с fingerprint из config (его записал `trust`) и сохранённым
    `.deploy-state/<environment>/known_hosts`.
 6. CLI сначала пробует managed user. На первом запуске явно разрешённый root password
    либо заранее установленный key `bootstrap_user` создаёт managed account.

@@ -4,7 +4,7 @@ ARG ANSIBLE_CORE_VERSION=2.18.6
 ARG ANSIBLE_LINT_VERSION=25.4.0
 ARG YAMLLINT_VERSION=1.37.1
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-client sshpass ca-certificates \
+ && apt-get install -y --no-install-recommends openssh-client sshpass ca-certificates openssl \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --no-cache-dir \
       "ansible-core==${ANSIBLE_CORE_VERSION}" \

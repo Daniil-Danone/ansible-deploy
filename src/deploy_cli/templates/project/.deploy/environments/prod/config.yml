@@ -8,7 +8,8 @@ server:
   deploy_user: deploy
   ssh_key: keys/prod_ed25519
   public_key: keys/prod_ed25519.pub
-  host_key_fingerprints: [SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB]
+  # Filled by `ansible-deploy trust prod`; empty means the host is not trusted yet.
+  host_key_fingerprints: []
 application:
   compose: deploy/compose.prod.yml
   env_file: environments/prod/app.env

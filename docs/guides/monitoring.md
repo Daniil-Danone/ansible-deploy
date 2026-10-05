@@ -1,24 +1,23 @@
 # Централизованные логи
 
-1. Настройте monitoring config, DNS и SSH fingerprint.
-2. Во внешнем root из `deploy secrets path` создайте
-   `environments/monitoring/monitoring.env`, задайте Grafana password, Loki username и
-   crypt SHA-512 hash пароля (`openssl passwd -6`).
+1. Настройте monitoring config и DNS, затем выполните `deploy trust monitoring`.
+2. Создайте заготовку secret-файла командой `deploy secrets init monitoring` и заполните
+   в `environments/monitoring/monitoring.env` Grafana password, Loki username и crypt
+   SHA-512 hash пароля.
 3. Там же создайте отдельные `environments/{stage,prod}/collector.password` и
    ограничьте доступ текущим пользователем (`chmod 600` либо Windows ACL).
 
-На машине без локального OpenSSL hash можно получить через одноразовый Docker
-container. Команда не содержит пароль в argv или shell history; введите его только в
-интерактивном prompt и перенесите напечатанную строку `$6$...` в
-`LOKI_PUSH_PASSWORD_HASH`:
+Hash считает сам CLI внутри runtime-контейнера, локальный OpenSSL не нужен. Пароль
+вводится только в скрытом prompt (дважды) и не попадает в argv, shell history или на
+диск; в stdout печатается единственная строка `$6$...` для `LOKI_PUSH_PASSWORD_HASH`:
 
 ```text
-docker run --rm -it alpine:3.20 sh -lc 'apk add --no-cache openssl >/dev/null && openssl passwd -6'
+deploy secrets hash-password
 ```
 
-Не используйте `echo PASSWORD | ...`: plaintext попадёт в process/pipeline history или
-диагностический log. Hash не заменяет отдельный `LOKI_PUSH_PASSWORD`, который collectors
-используют для Basic Auth.
+Не используйте `echo PASSWORD | openssl ...`: plaintext попадёт в process/pipeline
+history или диагностический log. Hash не заменяет отдельный `LOKI_PUSH_PASSWORD`,
+который collectors используют для Basic Auth.
 
 ```text
 deploy monitoring deploy --ask-bootstrap-password

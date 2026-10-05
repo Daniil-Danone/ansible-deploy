@@ -152,6 +152,34 @@ def test_docker_operational_error_suppresses_sensitive_exception_chain(
     assert raised.value.__suppress_context__
 
 
+def test_failed_docker_command_reports_redacted_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = "ghp-super-secret-token"  # noqa: S105 - synthetic regression value
+    stderr = f"denied: permission_denied for {token}\nwrite:packages scope required"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=["docker"], returncode=1, stdout="", stderr=stderr
+        ),
+    )
+
+    with pytest.raises(RunnerError) as raised:
+        images._docker(
+            ["login", "ghcr.io", "--username", "owner"],
+            tmp_path,
+            images.Redactor([token]),
+        )
+
+    message = str(raised.value)
+    assert token not in message
+    assert "[REDACTED]" in message
+    assert "write:packages scope required" in message
+    assert "docker login ghcr.io --username" in message
+    assert raised.value.exit_code == 5
+
+
 @pytest.mark.parametrize(
     ("registry", "environment", "expected_host", "token"),
     [
@@ -716,7 +744,7 @@ def test_ask_token_uses_secure_prompt_and_redacts_login_failure(
         )
 
     assert token not in str(raised.value)
-    assert "suppressed" in str(raised.value)
+    assert "[REDACTED]" in str(raised.value)
     assert calls[0][1] == token + "\n"
     assert token not in calls[0][0]
 
@@ -1028,7 +1056,10 @@ def test_docker_errors_redact_registry_token(
         images._docker(arguments, tmp_path, images.Redactor([token]))
 
     assert token not in str(raised.value)
-    assert "suppressed" in str(raised.value) or "safely" in str(raised.value)
+    if mode == "output":
+        assert "[REDACTED]" in str(raised.value)
+    else:
+        assert "safely" in str(raised.value)
 
 
 def test_external_compose_edit_fails_cas_without_overwrite(

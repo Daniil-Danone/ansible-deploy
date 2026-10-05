@@ -17,5 +17,6 @@ Root account не блокируется целиком. Docker group и passwor
 высокие привилегии.
 
 `deploy server update ENV` повторно сводит управляемое состояние. Он не обновляет DNS,
-provider firewall, приложение, миграции или backup. `server update all` обрабатывает
-Stage и Prod и сообщает накопленные ошибки.
+provider firewall, application release, миграции или backup job. Backup schedule
+управляется отдельной `deploy backup setup prod`. `server update all` обрабатывает
+Stage, Prod и Monitoring и сообщает накопленные ошибки.

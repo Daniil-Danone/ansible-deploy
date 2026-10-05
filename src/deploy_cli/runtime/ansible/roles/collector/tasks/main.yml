@@ -45,14 +45,72 @@
             - /run/log/journal:/run/log/journal:ro
           restart: unless-stopped
 
-- name: Reconcile Alloy collector independently from application releases
-  community.docker.docker_compose_v2:
-    project_src: "{{ collector_dir }}"
-    files: [compose.yml]
-    project_name: "ansible_deploy_collector_{{ app_environment }}"
-    pull: missing
-    state: present
-    remove_orphans: true
-    wait: true
-  no_log: true
+- name: Reconcile Alloy collector with safe failure diagnostics
   when: not ansible_check_mode
+  block:
+    - name: Validate collector Compose configuration safely
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - "{{ collector_dir }}"
+          - -f
+          - "{{ collector_dir }}/compose.yml"
+          - -p
+          - "ansible_deploy_collector_{{ app_environment }}"
+          - config
+          - --quiet
+      changed_when: false
+      failed_when: false
+      no_log: true
+      register: collector_compose_preflight
+
+    - name: Reject invalid collector Compose configuration
+      ansible.builtin.fail:
+        msg: >-
+          Collector Compose configuration validation failed
+          (code {{ collector_compose_preflight.rc }})
+      when: collector_compose_preflight.rc != 0
+
+    - name: Reconcile Alloy collector independently from application releases
+      community.docker.docker_compose_v2:
+        project_src: "{{ collector_dir }}"
+        files: [compose.yml]
+        project_name: "ansible_deploy_collector_{{ app_environment }}"
+        pull: missing
+        state: present
+        remove_orphans: true
+        wait: true
+      no_log: true
+  rescue:
+    - name: Preserve safe collector reconciliation reason
+      ansible.builtin.set_fact:
+        collector_compose_failure_reason: >-
+          {{ ansible_failed_result.msg
+          if ansible_failed_task.name == 'Reject invalid collector Compose configuration'
+          else 'Collector Compose image pull or daemon reconciliation failed'
+          }}
+        collector_compose_failure_rc: >-
+          {{ collector_compose_preflight.rc
+          if ansible_failed_task.name == 'Reject invalid collector Compose configuration'
+          else ansible_failed_result.rc | default('unknown') }}
+
+    - name: Collect collector diagnostics without masking the original failure
+      block:
+        - name: Diagnose failed collector service
+          ansible.builtin.include_role:
+            name: compose_diagnostics
+          vars:
+            compose_diagnostics_dir: "{{ collector_dir }}"
+            compose_diagnostics_project: "ansible_deploy_collector_{{ app_environment }}"
+      rescue:
+        - name: Report unavailable collector diagnostics
+          ansible.builtin.debug:
+            msg: "Safe collector Compose diagnostics are unavailable"
+
+    - name: Preserve collector reconciliation failure
+      ansible.builtin.fail:
+        msg: >-
+          {{ collector_compose_failure_reason }}
+          (code {{ collector_compose_failure_rc }}); safe diagnostics are shown above

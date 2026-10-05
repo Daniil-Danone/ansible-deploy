@@ -167,17 +167,75 @@
         loki-data: {}
         grafana-data: {}
 
-- name: Reconcile monitoring Compose services
-  community.docker.docker_compose_v2:
-    project_src: "{{ monitoring_dir }}"
-    files: [compose.yml]
-    project_name: ansible_deploy_monitoring
-    pull: missing
-    state: present
-    remove_orphans: true
-    wait: true
-  no_log: true
+- name: Reconcile monitoring Compose services with safe failure diagnostics
   when: not ansible_check_mode
+  block:
+    - name: Validate monitoring Compose configuration safely
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - "{{ monitoring_dir }}"
+          - -f
+          - "{{ monitoring_dir }}/compose.yml"
+          - -p
+          - ansible_deploy_monitoring
+          - config
+          - --quiet
+      changed_when: false
+      failed_when: false
+      no_log: true
+      register: monitoring_compose_preflight
+
+    - name: Reject invalid monitoring Compose configuration
+      ansible.builtin.fail:
+        msg: >-
+          Monitoring Compose configuration validation failed
+          (code {{ monitoring_compose_preflight.rc }})
+      when: monitoring_compose_preflight.rc != 0
+
+    - name: Reconcile monitoring Compose services
+      community.docker.docker_compose_v2:
+        project_src: "{{ monitoring_dir }}"
+        files: [compose.yml]
+        project_name: ansible_deploy_monitoring
+        pull: missing
+        state: present
+        remove_orphans: true
+        wait: true
+      no_log: true
+  rescue:
+    - name: Preserve safe monitoring reconciliation reason
+      ansible.builtin.set_fact:
+        monitoring_compose_failure_reason: >-
+          {{ ansible_failed_result.msg
+          if ansible_failed_task.name == 'Reject invalid monitoring Compose configuration'
+          else 'Monitoring Compose image pull or daemon reconciliation failed'
+          }}
+        monitoring_compose_failure_rc: >-
+          {{ monitoring_compose_preflight.rc
+          if ansible_failed_task.name == 'Reject invalid monitoring Compose configuration'
+          else ansible_failed_result.rc | default('unknown') }}
+
+    - name: Collect monitoring diagnostics without masking the original failure
+      block:
+        - name: Diagnose failed monitoring services
+          ansible.builtin.include_role:
+            name: compose_diagnostics
+          vars:
+            compose_diagnostics_dir: "{{ monitoring_dir }}"
+            compose_diagnostics_project: ansible_deploy_monitoring
+      rescue:
+        - name: Report unavailable monitoring diagnostics
+          ansible.builtin.debug:
+            msg: "Safe monitoring Compose diagnostics are unavailable"
+
+    - name: Preserve monitoring reconciliation failure
+      ansible.builtin.fail:
+        msg: >-
+          {{ monitoring_compose_failure_reason }}
+          (code {{ monitoring_compose_failure_rc }}); safe diagnostics are shown above
 
 - name: Detect existing monitoring certificate
   ansible.builtin.stat:

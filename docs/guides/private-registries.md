@@ -44,7 +44,7 @@ Base64 — **не шифрование**: безопасность обеспе�
 Не копируйте Docker Desktop `~/.docker/config.json`: `credsStore` (`wincred`,
 `desktop`, `osxkeychain`) и `credHelpers` отсутствуют на Ubuntu. CLI такие файлы
 отклоняет. Существующий корректный auth сохраняется byte-for-byte, автоматически не
-ротируется; для ротации удалите именно ignored `registry-auth.json` и повторите publish.
+ротируется; для ротации удалите именно внешний `registry-auth.json` и повторите publish.
 
 Локальный `docker login` сохраняется в локальной Docker-конфигурации; CLI не делает
 logout. Если publish оборвался, часть образов уже может находиться в registry, но

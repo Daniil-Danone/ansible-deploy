@@ -1,6 +1,15 @@
 # Конфигурация
 
-## `global.yml`
+## Commit-safe и secret data
+
+`.deploy/` содержит YAML schema, project identity, template hashes и `.env.example`.
+Реальные secrets/keys находятся только под root из `deploy secrets path`. В schema v2
+secret fields — нормализованные относительные имена внутри этого root; absolute paths,
+`..`, symlink/reparse escape, hardlinks и небезопасные permissions отклоняются.
+
+## Global
+
+`.deploy/config/global.yml` использует schema 1:
 
 ```yaml
 schema_version: 1
@@ -21,73 +30,66 @@ global:
       unattended_upgrades: true
 ```
 
-Неизвестные поля запрещены. Timezone — имя IANA.
-
-## Environment `config.yml`
-
-Обязательные группы: `schema_version`, `environment`, `server`, `application`, `domain`,
-`acme_email`; `health_path` по умолчанию `/health`.
-
-- `server.host`, `ssh_port`: DNS/IP и порт VPS;
-- `bootstrap_user`: initial account, обычно `root`;
-- `deploy_user`: managed account, обычно `deploy`;
-- `ssh_key`, `public_key`: relative project paths или absolute paths существующей пары;
-- `host_key_fingerprints`: один или несколько точных OpenSSH SHA256 fingerprints;
-- `compose`, `env_file`: файлы приложения относительно project root;
-- `registry_auth_file`: optional secret внутри project root;
-- `remote_dir`: нормальный путь ниже `/srv` или `/opt`, минимум один дочерний сегмент;
-- `allowed_loopback_ports`: разрешённые `127.0.0.1` published ports;
-- `allowed_bind_paths`: разрешённые absolute server bind sources;
-- `required_env_vars`: уникальные uppercase имена;
-- `domain`, `acme_email`: TLS target и контакт Let's Encrypt.
-- `collector.push_url`: только HTTPS endpoint `/loki/api/v1/push`;
-- `collector.username`, `collector.password_file`: Basic Auth collector и отдельный
-  локальный secret-файл внутри project root.
-- `collector.remote_dir`: отдельный leaf ниже `/opt` или `/srv`; он не может совпадать,
-  содержать или находиться внутри application `remote_dir`.
-
-`APP_ENV` в env обязан совпадать с environment. Значения env не печатаются.
-
-## `.deploy/images.yml`
+## Stage/Production schema v2
 
 ```yaml
-schema_version: 1
-services:
-  api:
-    context: backend
-    dockerfile: Dockerfile
-    image: myapp-api
-environments:
-  stage: {compose: deploy/compose.stage.yml}
-  prod: {compose: deploy/compose.prod.yml}
+schema_version: 2
+environment: stage
+server:
+  host: stage.example.com
+  ssh_port: 22
+  bootstrap_user: root
+  deploy_user: deploy
+  ssh_key: keys/stage_ed25519
+  public_key: keys/stage_ed25519.pub
+  host_key_fingerprints: [SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA]
+application:
+  compose: deploy/compose.stage.yml
+  env_file: environments/stage/app.env
+  registry_auth_file: environments/stage/registry-auth.json
+  remote_dir: /srv/myapp-stage
+  allowed_loopback_ports: [8080]
+  required_env_vars: [APP_ENV]
+domain: stage.example.com
+acme_email: ops@example.com
+health_path: /health
 ```
 
-Build paths не выходят за project root. Целевой Compose должен иметь явные block mapping
-и простые `image:` строки; anchors, aliases, merge keys, duplicate/implicit mappings
-отклоняются, чтобы хирургическое обновление не меняло смысл YAML.
+`application.compose` — project-relative commit-safe file. Secret fields `env_file` и
+`registry_auth_file`, а также server key names резолвятся относительно внешнего root.
+Production обязан иметь отдельные paths/remote_dir и digest-pinned images.
+
+Optional `collector` содержит HTTPS Loki push URL, username и внешний
+`password_file`; его remote directory не пересекается с application directory.
+
+## Monitoring
+
+Monitoring schema v2 использует общий `server`, `domain`, `acme_email` и секцию:
+
+```yaml
+monitoring:
+  remote_dir: /opt/ansible-deploy/monitoring
+  secrets_file: environments/monitoring/monitoring.env
+  retention_days: 30
+```
+
+Monitoring env с Grafana/Loki credentials находится только во внешнем store.
+
+## Backup/Restore
+
+Production `backup` задаёт schedule, remote, external `credentials_file`, external
+`age_identity_file`, public recipient, include и retention. Restore target находится в
+`.deploy/environments/restore/config.yml`, имеет `environment: restore` и
+`source_environment: prod`; runtime secrets лежат под `environments/restore/`.
+Актуальные поля создаёт `deploy project sync`; проверяйте их через CLI после обновления.
 
 ## Compose policy
 
-- self-contained файл, без `include`, `extends`, `network_mode`;
-- published port только `127.0.0.1:HOST:CONTAINER` и HOST в allowlist;
-- named volumes объявлены; relative binds запрещены, absolute binds требуют allowlist;
-- разрешены declared bridge networks и `internal: true`; external/host/unmanaged запрещены;
-- interpolation в networks/volumes запрещена;
-- Production: каждый service имеет digest-pinned image, `build:` запрещён.
+- запрещены `include`, `extends`, host/external/unmanaged networks;
+- published ports только `127.0.0.1:HOST:CONTAINER` из allowlist;
+- named volumes объявлены; bind paths абсолютны и явно разрешены;
+- Production images закреплены `@sha256:...`, `build:` запрещён;
+- `APP_ENV` во внешнем env совпадает с environment.
 
-Stage не требует digest у всех сторонних images, поэтому его immutability слабее. Для
-реальной воспроизводимости закрепляйте digest в обоих окружениях.
-
-## Monitoring `config.yml`
-
-Monitoring использует те же `server`, `domain`, `acme_email`, но вместо `application`
-содержит `monitoring`: `remote_dir`, `secrets_file`, `retention_days`, loopback-порты
-Grafana/Loki. Secret env содержит `GF_SECURITY_ADMIN_USER`,
-`GF_SECURITY_ADMIN_PASSWORD`, `LOKI_PUSH_USERNAME`, `LOKI_PUSH_PASSWORD_HASH`.
-Реальный файл игнорируется Git и монтируется read-only, без содержимого в argv,
-process env или Ansible extra-vars.
-
-`collector.push_url` разбирается структурно: разрешён только
-`https://host[:port]/loki/api/v1/push`, без userinfo, query, fragment и whitespace.
-Monitoring/application/collector runtime directories не могут указывать на системные
-корни и обязаны быть нормализованными отдельными каталогами ниже `/opt` или `/srv`.
+Неизвестные поля запрещены строгими Pydantic models. Ошибка конфигурации возвращает
+код `2` и не должна включать secret value.

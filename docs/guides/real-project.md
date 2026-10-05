@@ -32,7 +32,7 @@ my-app/
     ├── images.yml
     └── environments/stage/
         ├── config.yml
-        └── app.env
+        └── .env.example
 ```
 
 ## Описание сборок
@@ -133,8 +133,9 @@ volumes:
 network допустимы; external/host/unmanaged network запрещены. Относительные bind mounts
 запрещены; используйте named volumes или явно разрешённые absolute server paths.
 
-`app.env` содержит `APP_ENV=stage`, DSN, пароли БД и ключи приложения. Он не попадает
-в image или Git. Укажите имена обязательных переменных в `required_env_vars`.
+Внешний `environments/stage/app.env` содержит `APP_ENV=stage`, DSN, пароли БД и ключи
+приложения. Он не находится в worktree и не попадает в image/Git. Укажите имена
+обязательных переменных в `required_env_vars`.
 
 ## Релиз
 
@@ -147,12 +148,11 @@ deploy stage --ask-bootstrap-password
 ```
 
 CLI не запускает DB migrations. Выполняйте их отдельно и делайте backward-compatible,
-потому что rollback приложения не откатывает данные. Backup/restore БД также пока вне
-CLI; универсальный backup — будущая roadmap-возможность после проектирования хранения,
-шифрования, retention и проверки восстановления.
+потому что rollback приложения не откатывает данные. Backup/restore настраивается
+отдельно по [runbook](backup-restore.md) и не заменяет migration rollback.
 
 ## Сейчас не поддерживается
 
-Автоматизация DNS/provider firewall, secrets manager, migrations, backup/restore,
-DB rollback, multi-host, rolling/zero downtime, автоматическая очистка releases/images
-и несколько доменов.
+Автоматизация DNS/provider firewall, hosted secrets manager, migrations, DB rollback,
+multi-host, rolling/zero downtime, автоматическая очистка releases/images и несколько
+доменов.

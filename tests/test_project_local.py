@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from io import StringIO
 from pathlib import Path
 
@@ -224,7 +225,7 @@ def test_packaged_runtime_matches_contributor_sources() -> None:
         (source / "password-once.sh", runtime.joinpath("password-once.sh")),
     ]
     for local in (source / "ansible").rglob("*"):
-        if local.is_file():
+        if local.is_file() and "__pycache__" not in local.parts and local.suffix != ".pyc":
             packaged = runtime.joinpath("ansible")
             for part in local.relative_to(source / "ansible").parts:
                 packaged = packaged.joinpath(part)
@@ -242,6 +243,7 @@ def test_runtime_build_uses_ephemeral_minimal_context(
     project = _copy_demo(tmp_path)
     runner = AnsibleRunner(project, Redactor([]))
     observed: dict[str, object] = {}
+    monkeypatch.setattr(runner, "_image_has_runtime_hash", lambda _digest: False)
 
     def inspect(args, *, exit_code, stdin_text=None):
         del exit_code, stdin_text
@@ -264,6 +266,127 @@ def test_runtime_build_uses_ephemeral_minimal_context(
     assert "ansible/playbooks/site.yml" in files
     assert not any(name.startswith(".deploy/") for name in files)
     assert not any(name.startswith("backend/") for name in files)
+
+
+def test_runtime_build_reuses_image_with_matching_content_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _copy_demo(tmp_path)
+    runner = AnsibleRunner(project, Redactor([]))
+    observed_hashes: list[str] = []
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        runner,
+        "_image_has_runtime_hash",
+        lambda digest: observed_hashes.append(digest) or True,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda args, **_kwargs: commands.append(list(args)),
+    )
+
+    runner.build_image()
+
+    assert len(observed_hashes) == 1
+    assert len(observed_hashes[0]) == 64
+    assert commands == []
+
+
+def test_runtime_build_label_changes_when_packaged_asset_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _copy_demo(tmp_path)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    runner = AnsibleRunner(project, Redactor([]))
+    commands: list[list[str]] = []
+    monkeypatch.setattr("deploy_cli.runner.runtime_resources", lambda: runtime)
+    monkeypatch.setattr(runner, "_image_has_runtime_hash", lambda _digest: False)
+    monkeypatch.setattr(
+        runner,
+        "_run",
+        lambda args, **_kwargs: commands.append(list(args)),
+    )
+
+    runner.build_image()
+    first_label = commands[-1][commands[-1].index("--label") + 1]
+    (runtime / "Dockerfile").write_text("FROM busybox\n", encoding="utf-8")
+    runner.build_image()
+    second_label = commands[-1][commands[-1].index("--label") + 1]
+
+    assert first_label != second_label
+
+
+def test_runtime_build_and_runner_use_exact_content_addressed_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _copy_demo(tmp_path)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    runner = AnsibleRunner(project, Redactor([]))
+    commands: list[list[str]] = []
+    monkeypatch.setattr("deploy_cli.runner.runtime_resources", lambda: runtime)
+    monkeypatch.setattr(runner, "_image_has_runtime_hash", lambda _digest: False)
+    monkeypatch.setattr(runner, "_run", lambda args, **_kwargs: commands.append(list(args)))
+
+    runner.build_image()
+    first_reference = runner.runtime_image
+    (runtime / "Dockerfile").write_text("FROM busybox\n", encoding="utf-8")
+    runner.build_image()
+    second_reference = runner.runtime_image
+
+    assert first_reference.startswith("ansible-deploy:runtime-")
+    assert second_reference.startswith("ansible-deploy:runtime-")
+    assert first_reference != second_reference
+    assert commands[0][commands[0].index("-t") + 1] == first_reference
+    assert commands[1][commands[1].index("-t") + 1] == second_reference
+    assert "ansible-deploy:local" not in commands[0] + commands[1]
+
+
+def test_concurrent_runtime_versions_never_retag_a_shared_mutable_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtimes: dict[str, Path] = {}
+    for name, base in (("version-a", "scratch"), ("version-b", "busybox")):
+        runtime = tmp_path / name
+        runtime.mkdir()
+        (runtime / "Dockerfile").write_text(f"FROM {base}\n", encoding="utf-8")
+        runtimes[name] = runtime
+    runners = {
+        name: AnsibleRunner(tmp_path / f"project-{name}", Redactor([])) for name in runtimes
+    }
+    commands: list[list[str]] = []
+    lock = threading.Lock()
+
+    monkeypatch.setattr(
+        "deploy_cli.runner.runtime_resources",
+        lambda: runtimes[threading.current_thread().name],
+    )
+    for runner in runners.values():
+        monkeypatch.setattr(runner, "_image_has_runtime_hash", lambda _digest: False)
+
+        def capture(args, **_kwargs):
+            with lock:
+                commands.append(list(args))
+
+        monkeypatch.setattr(runner, "_run", capture)
+
+    threads = [
+        threading.Thread(target=runner.build_image, name=name)
+        for name, runner in runners.items()
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    references = {command[command.index("-t") + 1] for command in commands}
+    assert len(references) == 2
+    assert references == {runner.runtime_image for runner in runners.values()}
+    assert all(reference.startswith("ansible-deploy:runtime-") for reference in references)
 
 
 def test_playbook_mounts_only_addressed_project_inputs(

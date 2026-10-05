@@ -1,91 +1,81 @@
 # ansible-deploy
 
-`ansible-deploy` — CLI для воспроизводимого развёртывания Docker Compose-приложений
-на выделенном Ubuntu 24.04 сервере. Проект хранит `.deploy/`, Compose и секретные
-env-файлы, а устанавливаемый Python-пакет приносит фиксированный Ansible runtime.
+`ansible-deploy` — Python CLI с упакованным Ansible runtime для воспроизводимого
+развёртывания Docker Compose-приложения на отдельных Ubuntu 24.04 VPS. CLI управляет
+Stage, Production, Monitoring, резервными копиями и восстановлением; приложение
+доставляется как immutable image.
 
-CLI локально собирает и публикует образы в GHCR или Docker Hub, закрепляет их по
-digest, подготавливает сервер, включает HTTPS и запускает приложение. Исходный код
-на VPS не копируется и там не собирается.
+## Быстрый путь
 
-## С чего начать
+```bash
+python -m pip install /path/to/ansible-deploy
+cd /path/to/application
+deploy project init
+deploy secrets path
+deploy images publish stage --registry ghcr --namespace OWNER --ask-token
+deploy stage
+deploy status stage
+```
 
-Выберите свою рабочую систему. Каждая инструкция автономна: от установки инструментов
-до первого HTTPS-ответа demo-приложения.
+После `project init` замените example host/domain/fingerprint и Compose. Реальные
+`app.env`, registry credentials, SSH private keys, backup credentials и age identity
+создавайте только во внешнем каталоге, который печатает `deploy secrets path`.
+`.deploy/` целиком предназначен для commit-safe конфигурации.
 
-- [Windows](docs/getting-started/windows.md)
-- [macOS](docs/getting-started/macos.md)
-- [Ubuntu](docs/getting-started/ubuntu.md)
-
-## Возможности
-
-- первичная настройка чистого Ubuntu 24.04 по root-паролю;
-- автоматическое создание отдельного Ed25519-ключа и пользователя `deploy`;
-- Docker, Nginx, Certbot, UFW, Fail2ban и unattended upgrades;
-- сборка и публикация нескольких образов в GHCR или Docker Hub;
-- приватные registry с отдельным read-only токеном сервера;
-- digest-pinned Production, проверка DNS/SSH host key/Compose/env;
-- обновление управляемого состояния сервера и откат приложения Production.
-- отдельный monitoring VPS с Grafana/Loki и Alloy-сборщиками Docker/journald;
-- HTTPS для Grafana, authenticated HTTPS Loki push и закрытые raw-порты.
+Полная последовательность с Production, Monitoring, backup и диагностикой:
+[канонический runbook](docs/runbook.md). Для установки инструментов выберите только
+свою ОС: [Windows](docs/getting-started/windows.md),
+[macOS](docs/getting-started/macos.md), [Ubuntu](docs/getting-started/ubuntu.md).
 
 ## Поддерживаемая матрица
 
-| Часть | Поддерживается |
+| Компонент | Контракт |
 |---|---|
-| Рабочая машина | Windows, macOS, Ubuntu; Python 3.12+, Git, Docker, OpenSSH |
-| Целевой сервер | отдельный чистый Ubuntu 24.04 VPS |
-| Registry | private/public GHCR и Docker Hub |
-| Окружения | Stage, изолированный Production и отдельный Monitoring |
-| Application | один Compose-проект, один домен, upstream `127.0.0.1:8080` |
+| Управляющая машина | Windows, macOS, Ubuntu; Python 3.12+, Git, Docker, OpenSSH |
+| Целевые серверы | отдельные чистые Ubuntu 24.04 VPS |
+| Окружения | Stage, изолированные Production, Monitoring и Restore Drill |
+| Registry | GHCR или Docker Hub, public/private |
+| Приложение | Docker Compose, один домен и loopback upstream `127.0.0.1:8080` |
+| Секреты | внешний project-scoped store; schema v2 содержит относительные имена |
+| CI/CD | reusable GitHub Actions workflow, immutable SHA, protected Production Environment |
 
-## Границы проекта
+## Безопасное обновление CLI и проекта
 
-CLI рассчитан на один домен, один сервер и один upstream `127.0.0.1:8080`. Он не
-автоматизирует DNS и firewall провайдера, secrets manager, миграции и backup базы,
-multi-host/rolling/zero-downtime deploy, очистку старых релизов и образов. Rollback
-не откатывает базу данных.
+Обновление Python-пакета не меняет application repository само по себе:
 
-> UFW может сбросить существующие правила. Используйте отдельный чистый сервер, а не
-> VPS с другими приложениями. Поддерживаемая и проверенная цель — Ubuntu 24.04;
-> дистрибутив пока не определяется автоматически.
-
-## Жизненный цикл
-
-```text
-локальный Git commit
-  -> build и push images
-  -> проверка immutable digest
-  -> обновление Compose
-  -> проверка DNS и SSH host key
-  -> bootstrap root (только первый раз)
-  -> deploy-пользователь + Docker/Nginx/TLS
-  -> HTTPS health check
+```bash
+deploy project sync --check
+deploy project sync
+git diff -- .deploy deploy
 ```
+
+CLI обновляет только файлы, чей hash совпадает с ранее установленным шаблоном.
+Изменённый пользователем config/Compose остаётся нетронутым; новая версия появляется
+рядом как `*.deploy-new`, а команда возвращает ненулевой код. Подробнее:
+[обновление проекта](docs/guides/upgrading.md).
+
+## Границы
+
+DNS, firewall облачного провайдера, GitHub Environments и выдача внешних credentials
+настраиваются вручную. Миграции приложения не запускаются CLI. Restore Production
+выполняется только на отдельный target; rollback приложения не откатывает базу.
+Live VPS/DNS/Google Drive acceptance требует реальные доступы и не считается
+подтверждённым локальными тестами.
 
 ## Документация
 
 - [Карта документации](docs/README.md)
-- Практика: [demo-app](docs/guides/demo-app.md),
-  [настоящий проект](docs/guides/real-project.md),
-  [приватные registry](docs/guides/private-registries.md),
-  [Production](docs/guides/production.md), [централизованные логи](docs/guides/monitoring.md)
-- Концепции: [как всё работает](docs/concepts/how-it-works.md),
-  [SSH и ключи](docs/concepts/ssh-and-keys.md),
-  [состояние сервера](docs/concepts/server-state.md)
-- Справочник: [CLI](docs/reference/cli.md),
-  [конфигурация](docs/reference/configuration.md),
-  [структура проекта](docs/reference/project-layout.md)
-- [Безопасность](docs/security.md) · [Решение проблем](docs/troubleshooting.md)
+- [Конфигурация schema v2](docs/reference/configuration.md)
+- [CLI](docs/reference/cli.md) · [структура проекта](docs/reference/project-layout.md)
+- [CI/CD](docs/guides/ci-cd.md) · [backup/restore/DR](docs/guides/backup-restore.md)
+- [Безопасность](docs/security.md) · [диагностика](docs/troubleshooting.md)
 
-## Для разработчиков CLI
+## Проверка разработки CLI
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate       # Windows: .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
-python -m pytest
+python -m pytest -o addopts= -q -ra
+python -m ruff check .
+python -m mypy
+yamllint .
 ```
-
-Новые приложения используют project-local `.deploy/`. Корневые `config/` и
-`environments/` оставлены только как fixture обратной совместимости.

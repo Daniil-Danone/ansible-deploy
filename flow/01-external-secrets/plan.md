@@ -10,8 +10,8 @@
       Готово: T14–T16 закрываются атомарно в шаге 2
 - [ ] 5. Fail-closed миграция legacy project-local secrets
       Готово: T17–T21 зелёные; collision/partial failure не меняют источник и config
-- [ ] 6. Onboarding и единый deployment runbook
-      Готово: T22–T24 зелёные; clean-copy walkthrough не создаёт secrets в Git worktree; runbook объясняет Stage, Prod, Monitoring и Collectors, порядок команд и диагностику
+- [~] 6. Onboarding и единый deployment runbook
+      Локально: T22–T24 contract покрыты scaffold/docs/CI tests; live VPS, Google Drive и GitHub Environment acceptance остаются ручными
 - [ ] 7. Независимая security-проверка итерации
       Готово: полный набор из `flow/PROJECT.md` зелёный; reviewer не оставил blocker/major; `python .codex/tools/verify.py` не нашёл утечек
 - [ ] 8. `/ship`: PR external secret storage

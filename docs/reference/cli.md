@@ -1,76 +1,38 @@
-# Справочник CLI
+# CLI
 
-Глобальные options ставятся **до** subcommand:
+Глобальные options ставятся перед командой:
 
 ```text
 deploy [--project-dir PATH] [--verbose] COMMAND ...
 ```
 
-- `--project-dir`: корень приложения; по умолчанию current directory.
-- `--verbose`: расширенный runtime output. Секреты редактируются, но logs всё равно
-  храните осторожно.
-
-## Deploy
+Основные команды:
 
 ```text
-deploy stage [--dry-run] [--ask-bootstrap-password] [--version SHA]
-deploy prod  [--dry-run] [--ask-bootstrap-password] [--version SHA] [--yes]
-```
-
-Без `--version` берётся `git rev-parse HEAD`; допустимы 7–40 lowercase hex. Key
-автоматически создаётся только не-dry deploy. Password prompt скрытый; его нельзя
-совмещать с dry-run. Prod просит ввести `prod`, `--yes` предназначен для automation.
-
-Managed user проверяется первым. На первом сервере `--ask-bootstrap-password` разрешает
-root/bootstrap password; без флага возможен заранее установленный key `bootstrap_user`.
-
-## Images
-
-```text
-deploy images publish {stage,prod} --registry {ghcr,dockerhub} --namespace NAME
-  [--username NAME] [--ask-token] [--pull-username NAME]
-  [--ask-pull-token] [--tag TAG]
-```
-
-Build/push выполняется локально, Compose обновляется digest. Publish token не сохраняется;
-pull token используется для server auth. Prod confirmation эта команда не выполняет.
-
-## Status, server и rollback
-
-```text
-deploy status {stage,prod}
-deploy server update {stage,prod,monitoring,all} [--dry-run] [--yes]
+deploy project init
+deploy project sync [--check]
+deploy secrets path [--new-project-id]
+deploy images publish <stage|prod> ...
+deploy stage [--dry-run] [--version SHA]
+deploy prod [--dry-run] [--version SHA] [--yes]
+deploy status <stage|prod>
 deploy rollback prod [--yes]
+deploy server update <stage|prod|monitoring|all> [--dry-run] [--yes]
+deploy monitoring <deploy|status|update> [--dry-run]
+deploy collectors <deploy|status|update> <stage|prod|all> [--dry-run]
+deploy backup setup prod
+deploy backup run prod
+deploy backup list prod
+deploy backup restore prod --target restore --backup ID [--yes]
 ```
 
-`status` делает только HTTPS GET к `domain + health_path`; он не проверяет SSH,
-контейнеры или ресурсы. `server update` не выпускает application release. Rollback
-возвращает предыдущую app-конфигурацию/images, но не БД.
+`project sync --check` ничего не пишет и возвращает ненулевой код при pending update
+или conflict. Обычный sync никогда не перезаписывает изменённый config/Compose.
 
-## Monitoring и collectors
+`--dry-run` применяет Ansible check mode там, где он безопасен, и не выполняет
+bootstrap с password. Production-changing commands требуют интерактивного `prod`; в
+non-interactive protected CI используется `--yes`.
 
-```text
-deploy monitoring {deploy,status,update} [--dry-run] [--ask-bootstrap-password]
-deploy collectors {deploy,status,update} {stage,prod,all} [--dry-run] [--yes]
-```
-
-Эти команды не входят в application release/rollback transaction. Операции collectors
-`all` всегда идут Stage → Prod, после ошибки пытаются обработать остальные окружения и
-только затем возвращают ошибку.
-
-## Коды завершения
-
-| Код | Смысл |
-|---:|---|
-| 0 | успех |
-| 1 | только обработанный `KeyboardInterrupt` |
-| 2 | configuration, confirmation, paths или DNS |
-| 3 | host fingerprint/environment guard/bootstrap state |
-| 4 | SSH/access verification |
-| 5 | runtime, provisioning, Docker image operation |
-| 6 | application deployment transaction |
-| 7 | health check |
-| 9 | rollback |
-
-Неожиданное исключение не преобразуется в универсальный код: Python traceback и его
-exit status сохраняются, чтобы дефект не маскировался.
+Код `0` означает доказанный успех команды, `2` — configuration/security boundary;
+runner возвращает ненулевой код underlying operation. Не анализируйте только текст:
+automation должна проверять exit code.

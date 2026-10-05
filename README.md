@@ -1,7 +1,7 @@
 # ansible-deploy
 
 `ansible-deploy` — Python CLI с упакованным Ansible runtime для воспроизводимого
-развёртывания Docker Compose-приложения на отдельных Ubuntu 24.04 VPS. CLI управляет
+развёртывания Docker Compose-приложения на отдельных Ubuntu 24.04/26.04 LTS VPS. CLI управляет
 Stage, Production, Monitoring, резервными копиями и восстановлением; приложение
 доставляется как immutable image.
 
@@ -32,7 +32,7 @@ deploy status stage
 | Компонент | Контракт |
 |---|---|
 | Управляющая машина | Windows, macOS, Ubuntu; Python 3.12+, Git, Docker, OpenSSH |
-| Целевые серверы | отдельные чистые Ubuntu 24.04 VPS |
+| Целевые серверы | отдельные чистые Ubuntu 24.04 LTS или 26.04 LTS VPS |
 | Окружения | Stage, изолированные Production, Monitoring и Restore Drill |
 | Registry | GHCR или Docker Hub, public/private |
 | Приложение | Docker Compose, один домен и loopback upstream `127.0.0.1:8080` |

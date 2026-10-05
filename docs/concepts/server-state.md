@@ -1,6 +1,6 @@
 # Что CLI настраивает на сервере
 
-Цель — выделенный чистый Ubuntu 24.04. CLI пока не определяет дистрибутив автоматически.
+Цель — выделенный чистый Ubuntu 24.04 LTS или 26.04 LTS. CLI пока не определяет дистрибутив автоматически.
 
 - создаёт managed пользователя `deploy`, authorized key, NOPASSWD sudo, группу Docker;
 - устанавливает Docker Engine/Compose, Nginx, Certbot, UFW, Fail2ban;

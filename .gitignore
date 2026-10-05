@@ -14,3 +14,11 @@ __pycache__/
 secrets/
 *registry-auth.json
 .deploy-state/
+
+# AI agent working files (local only)
+flow/
+.codex/
+.agents/
+.claude/
+CLAUDE.md
+AGENTS.md

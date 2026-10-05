@@ -566,7 +566,7 @@ _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_REFERENCE = re.compile(
     r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::(?:\?[^}]*|[-+]))?\}|\$[A-Za-z_][A-Za-z0-9_]*"
 )
-# A non-empty interpolation default would embed the fallback value in the commit.
+# Under a secret-like key, a non-empty default would embed the secret in the commit.
 _ENV_DEFAULT_VALUE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:[-+][^}]+\}")
 _SECRET_ENV_VALUE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
@@ -603,15 +603,16 @@ def _validate_inline_environment(service_name: object, environment: object) -> N
             raise ConfigurationError(
                 f"Compose service {service_name!r} has invalid environment name {name!r}"
             )
-        if isinstance(value, str) and _ENV_DEFAULT_VALUE.search(value):
+        secret_name = bool(_SECRET_ENV_NAME.search(name))
+        if secret_name and isinstance(value, str) and _ENV_DEFAULT_VALUE.search(value):
             raise ConfigurationError(
                 f"Compose service {service_name!r} sets a default value in the "
                 f"interpolation for {name!r}; a default value is committed with the "
-                "Compose file, so only ${NAME}, ${NAME:?message}, ${NAME:-} and "
-                "${NAME:+} are allowed"
+                "Compose file, so a secret-like key accepts only ${NAME}, "
+                "${NAME:?message}, ${NAME:-} and ${NAME:+}"
             )
         literal = _ENV_REFERENCE.sub("", value) if isinstance(value, str) else None
-        if _SECRET_ENV_NAME.search(name) and literal != "":
+        if secret_name and literal != "":
             raise ConfigurationError(
                 f"Compose service {service_name!r} declares secret-like environment key "
                 f"{name!r} with a literal value; reference the external application "

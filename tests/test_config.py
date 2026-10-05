@@ -498,6 +498,9 @@ def test_compose_accepts_non_secret_inline_environment(tmp_path: Path) -> None:
         {"REDIS_PASSWORD": "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"},
         {"BOT_WEBHOOK_URL": "${BOT_PUBLIC_URL:?BOT_PUBLIC_URL is required}/bot"},
         {"DSN": "${DB_PASSWORD}"},
+        {"POSTGRES_DB": "${DB_NAME:-uwords}"},
+        {"BOT_ADMIN_CHAT_ID": "${BOT_ADMIN_CHAT_ID:-0}"},
+        {"BOT_LINK": "${BOT_LINK:-}"},
     ],
 )
 def test_compose_accepts_environment_references_to_external_env_file(

@@ -7,7 +7,9 @@
 - В Compose `environment` допустимы ссылки на переменные внешнего env-файла, включая
   переменные с secret-like именами (`POSTGRES_PASSWORD: ${DB_PASSWORD}`): в commit
   попадает только имя. Запрещены литеральные secrets, значения по умолчанию у
-  интерполяций (`${NAME:-value}`) и встроенные credentials.
+  интерполяций под secret-like ключом (`${NAME:-value}`) и встроенные credentials.
+  Для несекретных ключей значения по умолчанию допустимы (`POSTGRES_DB:
+  ${DB_NAME:-uwords}`).
 - Schema v2 ограничивает sensitive paths внешним root и проверяет type, owner,
   permissions, hardlink и symlink/reparse traversal непосредственно перед use.
 - Для Stage, Production, Monitoring и Restore используйте разные SSH/registry/runtime

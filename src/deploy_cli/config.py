@@ -320,9 +320,51 @@ def load_configuration(
             {**protected, "backup credentials": env_config.backup.credentials_file},
             field="Age identity",
         )
+    _resolve_extra_env_files(project_dir, config_root, env_path, env_config)
     _reject_registry_auth_collisions(project_dir, config_root, env_path, env_config)
     _set_external_context(project_dir, env_config)
     return global_config, env_config
+
+
+def _resolve_extra_env_files(
+    project_dir: Path,
+    config_root: Path,
+    environment_config: Path,
+    config: EnvironmentConfig,
+) -> None:
+    """Resolve extra env files and keep each one distinct from every other input."""
+    app = config.application
+    for extra in app.extra_env_files:
+        extra.source = _external_file_path(
+            project_dir, extra.source, field="application extra environment"
+        )
+    absent = Path("/__absent__")
+    protected = {
+        "Compose": app.compose,
+        "environment file": app.env_file,
+        "registry authentication": app.registry_auth_file or absent,
+        "collector password": (
+            config.collector.password_file if config.collector is not None else absent
+        ),
+        "backup credentials": (
+            config.backup.credentials_file if config.backup is not None else absent
+        ),
+        "age identity": config.backup.age_identity_file if config.backup is not None else absent,
+        "SSH private key": config.server.ssh_key,
+        "SSH public key": config.server.public_key,
+        "global config": config_root / "config/global.yml",
+        "environment config": environment_config,
+        "README": project_dir / "README.md",
+    }
+    for index, extra in enumerate(app.extra_env_files):
+        others = {
+            f"extra environment {other.target}": other.source
+            for other_index, other in enumerate(app.extra_env_files)
+            if other_index != index
+        }
+        _reject_secret_collisions(
+            extra.source, {**protected, **others}, field="Extra application environment"
+        )
 
 
 def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) -> None:
@@ -436,6 +478,10 @@ def validate_local_inputs(
             [
                 ("Compose file", config.application.compose, False),
                 ("application environment", config.application.env_file, True),
+                *(
+                    (f"application extra environment {extra.target}", extra.source, True)
+                    for extra in config.application.extra_env_files
+                ),
             ]
         )
         if config.application.registry_auth_file is not None:
@@ -465,6 +511,7 @@ def validate_compose(config: EnvironmentConfig) -> None:
     networks = _validate_network_definitions(document.get("networks", {}))
     volumes = _validate_volume_definitions(document.get("volumes", {}))
     allowed = set(config.application.allowed_loopback_ports)
+    env_files = {".env", *(extra.target for extra in config.application.extra_env_files)}
     for service_name, raw_service in document["services"].items():
         if not isinstance(raw_service, dict):
             raise ConfigurationError(f"Compose service {service_name!r} must be a mapping")
@@ -475,6 +522,7 @@ def validate_compose(config: EnvironmentConfig) -> None:
                 f"Compose service {service_name!r} uses forbidden network_mode/container sharing"
             )
         _validate_inline_environment(service_name, raw_service.get("environment"))
+        _validate_service_env_files(service_name, raw_service.get("env_file"), env_files)
         _validate_service_networks(service_name, raw_service.get("networks", []), networks)
         _validate_service_volumes(
             service_name,
@@ -563,6 +611,29 @@ def _validate_inline_environment(service_name: object, environment: object) -> N
             )
 
 
+def _validate_service_env_files(
+    service_name: object, raw_env_files: object, allowed: set[str]
+) -> None:
+    """Allow only env files the deployment delivers beside compose.yml."""
+    if raw_env_files is None:
+        return
+    entries = raw_env_files if isinstance(raw_env_files, list) else [raw_env_files]
+    for entry in entries:
+        if isinstance(entry, dict):
+            unsupported = set(entry) - {"path", "required"}
+            if unsupported or not isinstance(entry.get("required", True), bool):
+                raise ConfigurationError(
+                    f"Compose service {service_name!r} env_file supports only path and "
+                    "boolean required"
+                )
+            entry = entry.get("path")
+        if not isinstance(entry, str) or entry.removeprefix("./") not in allowed:
+            raise ConfigurationError(
+                f"Compose service {service_name!r} env_file must reference .env or a "
+                "declared application extra_env_files target by plain file name"
+            )
+
+
 def validate_environment_file(config: EnvironmentConfig) -> None:
     """Validate required keys without exposing any secret values."""
     try:
@@ -587,6 +658,17 @@ def validate_environment_file(config: EnvironmentConfig) -> None:
             "Environment file APP_ENV does not match selected environment "
             f"{config.environment!r}"
         )
+    # Extra files carry service-specific secrets only: no required keys, but they must
+    # still be readable UTF-8 dotenv files before anything reaches the server.
+    for extra in config.application.extra_env_files:
+        field = f"application extra environment {extra.target}"
+        try:
+            content = read_external_secret_text(config, extra.source, field=field)
+            dotenv_values(stream=StringIO(content))
+        except ConfigurationError:
+            raise
+        except ValueError:
+            raise ConfigurationError(f"Invalid {field} for {config.environment}") from None
 
 
 def validate_registry_auth(
@@ -677,13 +759,22 @@ def validate_production_isolation(repo: Path, prod: EnvironmentConfig) -> None:
         "domain": (prod.domain, stage.domain),
         "remote runtime": (prod.application.remote_dir, stage.application.remote_dir),
         "Compose": (prod.application.compose, stage.application.compose),
-        "env file": (prod.application.env_file, stage.application.env_file),
     }
     reused = [
         label
         for label, (prod_value, stage_value) in comparisons.items()
         if prod_value == stage_value
     ]
+    prod_env_files = {
+        prod.application.env_file,
+        *(extra.source for extra in prod.application.extra_env_files),
+    }
+    stage_env_files = {
+        stage.application.env_file,
+        *(extra.source for extra in stage.application.extra_env_files),
+    }
+    if prod_env_files & stage_env_files:
+        reused.append("env file")
     if reused:
         raise ConfigurationError(
             "Production must not reuse Stage " + ", ".join(reused)

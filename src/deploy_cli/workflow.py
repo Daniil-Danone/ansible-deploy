@@ -49,6 +49,15 @@ def deployment_manifest(config: EnvironmentConfig) -> tuple[str, list[str]]:
         ("env", env_bytes),
         ("images", json.dumps(images, separators=(",", ":")).encode()),
     ]
+    # Appended only when declared so checksums of releases without extras stay stable.
+    for extra in config.application.extra_env_files:
+        field = f"application extra environment {extra.target}"
+        inputs.append(
+            (
+                f"extra_env:{extra.target}",
+                read_external_secret_bytes(config, extra.source, field=field),
+            )
+        )
     registry = config.application.registry_auth_file
     if registry is not None:
         inputs.append(
@@ -254,6 +263,7 @@ def deploy(
             config.server.ssh_key,
             compose_file=config.application.compose,
             env_file=config.application.env_file,
+            extra_env_files=config.application.extra_env_files,
             registry_auth_file=config.application.registry_auth_file,
             check=dry_run,
             exit_code=6,
@@ -667,6 +677,7 @@ def restore_backup(
         target.server.ssh_key,
         compose_file=target.application.compose,
         env_file=target.application.env_file,
+        extra_env_files=target.application.extra_env_files,
         registry_auth_file=target.application.registry_auth_file,
         exit_code=8,
     )

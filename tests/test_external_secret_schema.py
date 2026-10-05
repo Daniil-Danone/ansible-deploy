@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from deploy_cli import cli as cli_module
 from deploy_cli import config as config_module
 from deploy_cli import keys, secret_store
 from deploy_cli import runner as runner_module
@@ -22,6 +23,7 @@ from deploy_cli.config import (
     validate_environment_file,
     validate_local_inputs,
     validate_observability_inputs,
+    validate_production_isolation,
     validate_registry_auth,
 )
 from deploy_cli.keys import ensure_deploy_key
@@ -969,3 +971,188 @@ def test_t16_launch_boundary_rejects_root_swap_before_popen(
 
     with pytest.raises(RunnerError, match="SSH private key"):
         runner.playbook("deploy.yml", inventory, {}, config.server.ssh_key)
+
+
+def _set_extra_env_files(
+    project: Path, entries: list[dict[str, str]], *, environment: str = "stage"
+) -> None:
+    path = _environment_config(project, environment)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["application"]["extra_env_files"] = entries
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+
+BOT_ENV = {"source": "environments/stage/bot.env", "target": "bot.env"}
+
+
+def test_extra_env_file_source_resolves_inside_external_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, root = _v2_project(tmp_path, monkeypatch)
+    _set_extra_env_files(project, [BOT_ENV])
+
+    _, stage = load_configuration(project, "stage")
+
+    [extra] = stage.application.extra_env_files
+    assert extra.source == root / "environments/stage/bot.env"
+    assert extra.target == "bot.env"
+
+
+def test_extra_env_files_default_to_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+
+    _, stage = load_configuration(project, "stage")
+
+    assert stage.application.extra_env_files == []
+
+
+@pytest.mark.parametrize(
+    "target",
+    [".env", "bot", "bot.txt", "-bot.env", ".bot.env", "nested/bot.env", "../bot.env", "a b.env"],
+)
+def test_extra_env_file_target_must_be_plain_safe_env_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+    _set_extra_env_files(project, [{**BOT_ENV, "target": target}])
+
+    with pytest.raises(ConfigurationError, match="extra_env_files"):
+        load_configuration(project, "stage")
+
+
+@pytest.mark.parametrize(
+    "source", ["", "../outside.env", "/abs/bot.env", "portable\\escape", "C:/bot.env"]
+)
+def test_extra_env_file_source_uses_portable_name_validator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+    _set_extra_env_files(project, [{**BOT_ENV, "source": source}])
+
+    with pytest.raises(ConfigurationError, match="normalized relative paths"):
+        load_configuration(project, "stage")
+
+
+@pytest.mark.parametrize(
+    ("second", "message"),
+    [
+        ({"source": "environments/stage/other.env", "target": "bot.env"}, "targets"),
+        ({"source": "environments/stage/bot.env", "target": "other.env"}, "sources"),
+    ],
+)
+def test_extra_env_file_targets_and_sources_must_be_unique(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second: dict[str, str], message: str
+) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+    _set_extra_env_files(project, [BOT_ENV, second])
+
+    with pytest.raises(ConfigurationError, match=f"extra_env_files {message} must be unique"):
+        load_configuration(project, "stage")
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["environments/stage/app.env", "environments/stage/registry-auth.json", "keys/stage_ed25519"],
+)
+def test_extra_env_file_cannot_alias_another_secret_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+    _set_extra_env_files(project, [{**BOT_ENV, "source": source}])
+
+    with pytest.raises(ConfigurationError, match="collides with protected"):
+        load_configuration(project, "stage")
+
+
+def test_production_extra_env_file_cannot_reuse_stage_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, _ = _v2_project(tmp_path, monkeypatch)
+    _set_extra_env_files(
+        project,
+        [{"source": "environments/stage/app.env", "target": "bot.env"}],
+        environment="prod",
+    )
+    _, prod = load_configuration(project, "prod")
+
+    with pytest.raises(ConfigurationError, match="env file"):
+        validate_production_isolation(project, prod)
+
+
+def test_missing_extra_env_file_fails_preflight_without_disclosing_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, root = _v2_project(tmp_path, monkeypatch)
+    sensitive = "private/DO-NOT-DISCLOSE-bot.env"
+    _set_extra_env_files(project, [{"source": sensitive, "target": "bot.env"}])
+    _, config = load_configuration(project, "stage")
+    _write_external_file(config, config.application.env_file, b"APP_ENV=stage\n")
+    assert config.application.registry_auth_file is not None
+    _write_external_file(config, config.application.registry_auth_file, b"{}")
+
+    with pytest.raises(ConfigurationError) as raised:
+        validate_local_inputs(config, require_ssh=False, require_public_key=False)
+
+    message = str(raised.value)
+    assert "application extra environment bot.env" in message
+    assert sensitive not in message
+    assert str(root) not in message
+
+
+@pytest.mark.parametrize("kind", ["directory", "permissions", "hardlink"])
+def test_extra_env_file_must_be_regular_owner_only_without_hardlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    project, root = _v2_project(tmp_path, monkeypatch)
+    _set_extra_env_files(project, [{"source": "checks/bot.env", "target": "bot.env"}])
+    candidate = root / "checks/bot.env"
+    _secure_directory(root)
+    _secure_directory(candidate.parent)
+    if kind == "directory":
+        candidate.mkdir()
+    else:
+        candidate.write_bytes(b"DB_PASSWORD=synthetic-bot-value\n")
+        if kind == "permissions":
+            if os.name != "nt":
+                candidate.chmod(0o644)
+        else:
+            secure_secret_permissions(candidate)
+            os.link(candidate, root / "checks/bot-alias.env")
+
+    with pytest.raises(ConfigurationError, match="Invalid schema v2 application extra environment"):
+        load_configuration(project, "stage")
+
+
+def test_extra_env_file_values_are_redacted_checksummed_and_mounted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, root = _v2_project(tmp_path, monkeypatch)
+    _set_extra_env_files(project, [BOT_ENV])
+    _, config = load_configuration(project, "stage")
+    _write_external_file(config, config.application.env_file, b"APP_ENV=stage\n")
+    [extra] = config.application.extra_env_files
+    _write_external_file(config, extra.source, b"DB_PASSWORD=synthetic-bot-db-value\n")
+    assert config.application.registry_auth_file is not None
+    _write_external_file(config, config.application.registry_auth_file, b"{}")
+
+    redactor = Redactor(cli_module._operation_secrets(config))
+    assert "synthetic-bot-db-value" not in redactor("failed: synthetic-bot-db-value")
+    validate_environment_file(config)
+
+    first, _ = deployment_manifest(config)
+    extra.source.write_bytes(b"DB_PASSWORD=rotated-bot-db-value\n")
+    second, _ = deployment_manifest(config)
+    assert first != second
+
+    runner = AnsibleRunner(project, Redactor([]), external_secret_root=root)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runner, "_run", lambda args, **kwargs: calls.append(list(args)))
+    monkeypatch.setattr(runner_module, "validate_external_file_for_use", lambda *a, **k: None)
+    runner.playbook(
+        "deploy.yml",
+        project / "inventory.yml",
+        {},
+        config.server.ssh_key,
+        extra_env_files=config.application.extra_env_files,
+    )
+    assert f"{extra.source}:/run/secrets/app_extra_env/bot.env:ro" in calls[0]

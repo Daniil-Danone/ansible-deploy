@@ -54,9 +54,13 @@ Secret JSON — mapping относительного пути external store н�
 ```json
 {
   "environments/stage/app.env": "QVBQX0VOVj1zdGFnZQo=",
+  "environments/stage/bot.env": "BASE64_BOT_ENV_BYTES",
   "keys/stage_ed25519": "BASE64_PRIVATE_KEY_BYTES"
 }
 ```
+
+Каждый `application.extra_env_files[].source` добавляется в тот же JSON отдельным
+ключом с тем же относительным путём; без него deploy остановится на preflight.
 
 Не добавляйте JSON в repository, artifacts, step summary или debug output. Reusable
 workflow материализует files под `${{ runner.temp }}` с restrictive modes и удаляет

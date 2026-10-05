@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from deploy_cli.config import ConfigurationError, load_configuration, validate_compose
+from deploy_cli.models import ExtraEnvFile
 
 
 def _config(tmp_path: Path, compose: str):
@@ -156,3 +157,60 @@ def test_declared_named_volume_is_accepted(tmp_path: Path) -> None:
     )
 
     validate_compose(config)
+
+
+def _with_extra_env(tmp_path: Path, env_file: str):
+    config = _config(
+        tmp_path, f"services:\n  bot:\n    image: example/bot\n    env_file: {env_file}\n"
+    )
+    config.application.extra_env_files = [
+        ExtraEnvFile.model_validate({"source": "environments/stage/bot.env", "target": "bot.env"})
+    ]
+    return config
+
+
+@pytest.mark.parametrize(
+    "env_file",
+    [
+        ".env",
+        "bot.env",
+        "./bot.env",
+        "[.env, bot.env]",
+        "[{path: bot.env, required: true}]",
+        "[{path: ./bot.env}, .env]",
+    ],
+)
+def test_compose_env_file_accepts_primary_and_declared_targets(
+    tmp_path: Path, env_file: str
+) -> None:
+    validate_compose(_with_extra_env(tmp_path, env_file))
+
+
+@pytest.mark.parametrize(
+    "env_file",
+    [
+        "other.env",
+        "../bot.env",
+        "/etc/bot.env",
+        "nested/bot.env",
+        "[.env, other.env]",
+        "[{path: other.env}]",
+        "[{path: bot.env, format: raw}]",
+        "[{path: bot.env, required: 'yes'}]",
+        "[{required: true}]",
+        "[42]",
+    ],
+)
+def test_compose_env_file_rejects_undeclared_or_unsafe_references(
+    tmp_path: Path, env_file: str
+) -> None:
+    with pytest.raises(ConfigurationError, match="env_file"):
+        validate_compose(_with_extra_env(tmp_path, env_file))
+
+
+def test_compose_env_file_target_requires_declaration(tmp_path: Path) -> None:
+    config = _with_extra_env(tmp_path, "bot.env")
+    config.application.extra_env_files = []
+
+    with pytest.raises(ConfigurationError, match="extra_env_files"):
+        validate_compose(config)

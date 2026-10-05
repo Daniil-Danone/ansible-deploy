@@ -62,6 +62,10 @@ def _operation_secrets(config: EnvironmentConfig | MonitoringConfig) -> set[str]
         files.append((config.monitoring.secrets_file, "monitoring secrets", "env"))
     else:
         files.append((config.application.env_file, "application environment", "env"))
+        files.extend(
+            (extra.source, f"application extra environment {extra.target}", "env")
+            for extra in config.application.extra_env_files
+        )
         if config.application.registry_auth_file is not None:
             files.append(
                 (config.application.registry_auth_file, "registry authentication", "registry")

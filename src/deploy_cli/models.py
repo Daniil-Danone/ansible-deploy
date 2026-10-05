@@ -38,34 +38,39 @@ def _validate_v2_portable_names(raw: Any, paths: tuple[tuple[str, str], ...]) ->
             continue
         if value is None and section == "application" and field == "registry_auth_file":
             continue
-        if not isinstance(value, str):
-            raise ValueError("schema v2 external file names must be strings")
-        posix = PurePosixPath(value)
-        windows = PureWindowsPath(value)
-        reserved = {
-            "CON",
-            "PRN",
-            "AUX",
-            "NUL",
-            *(f"COM{number}" for number in range(1, 10)),
-            *(f"LPT{number}" for number in range(1, 10)),
-        }
-        if (
-            not value
-            or unicodedata.normalize("NFC", value) != value
-            or "\\" in value
-            or ":" in value
-            or posix.is_absolute()
-            or windows.is_absolute()
-            or bool(windows.drive)
-            or value != str(posix)
-            or any(part in {"", ".", ".."} for part in posix.parts)
-            or any(part.endswith((".", " ")) for part in posix.parts)
-            or any(part.split(".", 1)[0].upper() in reserved for part in posix.parts)
-            or any(unicodedata.category(character).startswith("C") for character in value)
-        ):
-            raise ValueError("schema v2 external file names must be normalized relative paths")
+        _require_portable_name(value)
     return raw
+
+
+def _require_portable_name(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("schema v2 external file names must be strings")
+    posix = PurePosixPath(value)
+    windows = PureWindowsPath(value)
+    reserved = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{number}" for number in range(1, 10)),
+        *(f"LPT{number}" for number in range(1, 10)),
+    }
+    if (
+        not value
+        or unicodedata.normalize("NFC", value) != value
+        or "\\" in value
+        or ":" in value
+        or posix.is_absolute()
+        or windows.is_absolute()
+        or bool(windows.drive)
+        or value != str(posix)
+        or any(part in {"", ".", ".."} for part in posix.parts)
+        or any(part.endswith((".", " ")) for part in posix.parts)
+        or any(part.split(".", 1)[0].upper() in reserved for part in posix.parts)
+        or any(unicodedata.category(character).startswith("C") for character in value)
+    ):
+        raise ValueError("schema v2 external file names must be normalized relative paths")
+    return value
 
 
 def _managed_remote_dir(value: str, *, field: str) -> str:
@@ -179,9 +184,23 @@ class ServerConfig(StrictModel):
         return values
 
 
+class ExtraEnvFile(StrictModel):
+    """Additional secret env file delivered next to Compose under a declared name."""
+
+    source: Path
+    # Plain file name beside compose.yml: no directories, never the primary ``.env``.
+    target: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.env$")
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def portable_source(cls, value: object) -> object:
+        return _require_portable_name(value)
+
+
 class ApplicationConfig(StrictModel):
     compose: Path
     env_file: Path
+    extra_env_files: list[ExtraEnvFile] = Field(default_factory=list)
     registry_auth_file: Path | None = None
     remote_dir: str = "/srv/myapp"
     allowed_loopback_ports: list[int] = Field(default_factory=list)
@@ -205,6 +224,17 @@ class ApplicationConfig(StrictModel):
             not re.fullmatch(r"[A-Z_][A-Z0-9_]*", value) for value in values
         ):
             raise ValueError("required_env_vars must contain unique shell-style names")
+        return values
+
+    @field_validator("extra_env_files")
+    @classmethod
+    def unique_extra_env_files(cls, values: list[ExtraEnvFile]) -> list[ExtraEnvFile]:
+        targets = [item.target for item in values]
+        sources = [item.source.as_posix() for item in values]
+        if len(targets) != len(set(targets)):
+            raise ValueError("extra_env_files targets must be unique")
+        if len(sources) != len(set(sources)):
+            raise ValueError("extra_env_files sources must be unique")
         return values
 
     @field_validator("allowed_bind_paths")

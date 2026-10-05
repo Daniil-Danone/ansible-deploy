@@ -46,6 +46,37 @@
     mode: "0600"
   no_log: true
 
+# current/ is reused across restores (unlike immutable releases), so drop extra env
+# files that are no longer declared instead of leaving stale secrets on the host.
+- name: Find Restore extra environments from earlier restores
+  ansible.builtin.find:
+    paths: "{{ app_dir }}/current"
+    patterns: ["*.env"]
+    file_type: file
+    hidden: false
+  register: restore_existing_extra_envs
+
+- name: Remove undeclared Restore extra environments
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ restore_existing_extra_envs.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: >-
+    (item.path | basename)
+    not in (app_extra_env_files | default([]) | map(attribute='dest') | list)
+
+- name: Deliver Restore extra environments securely
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ app_dir }}/current/{{ item.dest }}"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0600"
+  loop: "{{ app_extra_env_files | default([]) }}"
+  no_log: true
+
 - name: Validate and start Restore services without application health gating
   block:
     - name: Validate Restore Compose configuration without rendering secrets

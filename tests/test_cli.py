@@ -316,3 +316,20 @@ def test_getpass_insecure_fallback_is_rejected(monkeypatch) -> None:
 
     with pytest.raises(cli.ConfigurationError, match="Secure password input is unavailable"):
         cli._prompt_bootstrap_password("root", "server")
+
+
+def test_version_flag_prints_package_version(capsys) -> None:
+    from deploy_cli import __version__
+
+    with pytest.raises(SystemExit) as exc:
+        run(["--version"])
+
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"ansible-deploy {__version__}"
+
+
+def test_environment_version_option_is_not_shadowed_by_cli_version() -> None:
+    args = cli._parser().parse_args(["stage", "--version", "abc123"])
+
+    assert args.command == "stage"
+    assert args.version == "abc123"

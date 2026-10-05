@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ansible-deploy"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Reproducible Stage deployment CLI"
 requires-python = ">=3.12"
 dependencies = [
@@ -27,7 +27,12 @@ dev = [
 ]
 
 [project.scripts]
+ansible-deploy = "deploy_cli.cli:main"
+# Backward-compatible alias for the original command name.
 deploy = "deploy_cli.cli:main"
+
+[tool.hatch.version]
+path = "src/deploy_cli/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deploy_cli"]

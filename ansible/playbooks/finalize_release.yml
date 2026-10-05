@@ -1,7 +1,0 @@
----
-- name: Finalize externally verified application release
-  hosts: all
-  become: true
-  gather_facts: false
-  roles:
-    - role: release_finalize

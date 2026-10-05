@@ -1,7 +1,0 @@
----
-- name: Reconcile the independent log collector
-  hosts: all
-  become: true
-  gather_facts: true
-  roles:
-    - role: collector

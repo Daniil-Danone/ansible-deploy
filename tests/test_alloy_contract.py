@@ -4,7 +4,8 @@ from pathlib import Path
 from scripts.validate_alloy import ALLOY_IMAGE, render_fixture
 
 ROOT = Path(__file__).parents[1]
-TEMPLATE = ROOT / "ansible/roles/collector/templates/config.alloy.j2"
+ROLES = ROOT / "src/deploy_cli/runtime/ansible/roles"
+TEMPLATE = ROLES / "collector/templates/config.alloy.j2"
 
 
 def _without_strings_and_comments(text: str) -> str:
@@ -37,10 +38,10 @@ def test_alloy_collects_both_journal_locations_without_hardcoded_path() -> None:
     assert "path = \"/run/log/journal\"" not in template
     assert "path = \"/var/log/journal\"" not in template
     assert "/run/log/journal:/run/log/journal:ro" in (
-        ROOT / "ansible/roles/collector/tasks/main.yml"
+        ROLES / "collector/tasks/main.yml"
     ).read_text(encoding="utf-8")
     assert "/var/log/journal:/var/log/journal:ro" in (
-        ROOT / "ansible/roles/collector/tasks/main.yml"
+        ROLES / "collector/tasks/main.yml"
     ).read_text(encoding="utf-8")
 
 
@@ -59,7 +60,7 @@ def test_alloy_level_label_has_only_five_normalized_values() -> None:
 
 
 def test_alloy_official_validation_gate_uses_same_pinned_image_as_collector() -> None:
-    tasks = (ROOT / "ansible/roles/collector/tasks/main.yml").read_text(encoding="utf-8")
+    tasks = (ROLES / "collector/tasks/main.yml").read_text(encoding="utf-8")
     workflow = (ROOT / ".github/workflows/checks.yml").read_text(encoding="utf-8")
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 

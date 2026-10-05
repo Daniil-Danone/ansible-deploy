@@ -14,6 +14,7 @@ __pycache__/
 secrets/
 *registry-auth.json
 .deploy-state/
+dist/
 
 # AI agent working files (local only)
 flow/

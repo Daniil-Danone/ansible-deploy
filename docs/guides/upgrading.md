@@ -5,34 +5,34 @@ CLI не должна молча менять `.deploy/` или Compose.
 
 ## Порядок
 
-1. Обновите CLI тем же способом, которым он был установлен. Пакет предоставляет
-   отдельную команду `deploy`, поэтому не устанавливайте его в global Python. Для
-   virtual environment:
+1. Обновите CLI до нужного тега релиза. CLI ставится как изолированный global tool
+   через [uv](https://docs.astral.sh/uv/) из приватного репозитория; доступ берётся из
+   ваших Git credentials (HTTPS через credential manager/`gh auth login` или SSH key):
 
    ```bash
-   python -m pip install --upgrade /path/to/ansible-deploy
-   python -m pip show ansible-deploy
+   uv tool install --force "git+https://github.com/Daniil-Danone/ansible-deploy.git@vX.Y.Z"
+   # либо через SSH
+   uv tool install --force "git+ssh://git@github.com/Daniil-Danone/ansible-deploy.git@vX.Y.Z"
+   ansible-deploy --version
    ```
 
-   Для изолированного tool environment выберите один менеджер:
+   Без доступа к Git можно поставить wheel из GitHub Release:
 
    ```bash
-   uv tool install --force --reinstall /path/to/ansible-deploy
-   uv tool list --show-paths
-   # либо
-   pipx install --force /path/to/ansible-deploy
-   pipx list
+   gh release download vX.Y.Z --repo Daniil-Danone/ansible-deploy --pattern "*.whl"
+   uv tool install --force ./ansible_deploy-X.Y.Z-py3-none-any.whl
    ```
 
-   На Windows замените source path, например на
-   `C:\Code\MyRepos\ansible-deploy\ansible-deploy`. Проверьте, какой executable будет
-   запущен: `Get-Command deploy` в PowerShell или `command -v deploy` в POSIX shell, а
-   затем `deploy --help`. У CLI пока нет отдельного `--version`; версию установленного
-   пакета показывают `pip show`, `uv tool list` или `pipx list`.
+   `uv tool upgrade ansible-deploy` переустанавливает пакет из того же source; для
+   источника, закреплённого на теге, переход на новый тег — это `uv tool install --force`
+   с новым `@vX.Y.Z`. Альтернатива uv — `pipx install --force "git+https://...@vX.Y.Z"`.
+   Команда `deploy` остаётся алиасом `ansible-deploy`. Проверьте, какой executable будет
+   запущен: `Get-Command ansible-deploy` в PowerShell или `command -v ansible-deploy` в
+   POSIX shell.
 2. Из application repository выполните dry inspection:
 
    ```bash
-   deploy project sync --check
+   ansible-deploy project sync --check
    ```
 
 3. Если код `0`, scaffold актуален. Код `1` означает новые/обновляемые файлы или
@@ -40,7 +40,7 @@ CLI не должна молча менять `.deploy/` или Compose.
 4. Примените additive update и проверьте diff:
 
    ```bash
-   deploy project sync
+   ansible-deploy project sync
    git status --short
    git diff -- .deploy deploy
    ```

@@ -71,6 +71,25 @@ def test_reusable_deploy_has_protected_serial_environment_contract() -> None:
     assert ".deploy/ci_image_contract.py apply" in apply["run"]
 
 
+def test_release_workflow_publishes_only_version_matching_tags() -> None:
+    workflow = _workflow(ROOT / ".github/workflows/release.yml")
+    release = workflow["jobs"]["release"]
+    steps = [step.get("run", "") for step in release["steps"]]
+
+    assert workflow["on"] == {"push": {"tags": ["v*"]}}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert release["permissions"] == {"contents": "write"}
+    verify = next(step for step in release["steps"] if step.get("name", "").startswith("Verify"))
+    assert '"$TAG" != "v$version"' in verify["run"]
+    assert "deploy_cli.__version__" in verify["run"]
+    order = [
+        next(i for i, run in enumerate(steps) if marker in run)
+        for marker in ('"v$version"', "python -m pytest", "uv build", "gh release create")
+    ]
+    assert order == sorted(order)
+    assert "dist/*.whl dist/*.tar.gz" in steps[order[-1]]
+
+
 def test_application_caller_keeps_pr_quality_only_and_gates_deployments() -> None:
     workflow = _workflow(ROOT / ".github/examples/application-deploy.yml")
     jobs = workflow["jobs"]
@@ -144,6 +163,7 @@ def test_delivery_workflows_do_not_trace_or_artifact_secrets() -> None:
 def test_workflows_pin_every_third_party_action_to_full_sha() -> None:
     for relative in (
         ".github/workflows/checks.yml",
+        ".github/workflows/release.yml",
         ".github/workflows/reusable-deploy.yml",
         ".github/examples/application-deploy.yml",
     ):

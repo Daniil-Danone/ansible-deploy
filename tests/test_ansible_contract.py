@@ -3,10 +3,11 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).parents[1]
+RUNTIME = ROOT / "src/deploy_cli/runtime"
 
 
 def _text(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
+    return (RUNTIME / path).read_text(encoding="utf-8")
 
 
 def _yaml(path: str) -> list[dict[str, object]]:
@@ -16,7 +17,9 @@ def _yaml(path: str) -> list[dict[str, object]]:
 
 
 def test_demo_frontend_binds_upstream_to_loopback() -> None:
-    compose = yaml.safe_load(_text("examples/demo-app/deploy/compose.stage.yml"))
+    compose = yaml.safe_load(
+        (ROOT / "examples/demo-app/deploy/compose.stage.yml").read_text(encoding="utf-8")
+    )
 
     assert compose["services"]["frontend"]["ports"] == ["127.0.0.1:8080:8080"]
 

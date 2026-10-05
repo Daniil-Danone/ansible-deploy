@@ -38,9 +38,12 @@ jobs:
     concurrency:
       group: deploy-${{ github.repository }}-${{ inputs.environment }}
       cancel-in-progress: false
-    env:
-      ANSIBLE_DEPLOY_SECRETS_DIR: ${{ runner.temp }}/ansible-deploy-secrets
     steps:
+      - name: Set temporary secret store path
+        run: |
+          printf '%s\n' \
+            "ANSIBLE_DEPLOY_SECRETS_DIR=$RUNNER_TEMP/ansible-deploy-secrets" \
+            >> "$GITHUB_ENV"
       - name: Validate immutable inputs
         env:
           DEPLOYMENT_SHA: ${{ inputs.deployment_sha }}

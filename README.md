@@ -8,18 +8,25 @@ Stage, Production, Monitoring, резервными копиями и восст
 ## Быстрый путь
 
 ```bash
-python -m pip install /path/to/ansible-deploy
+uv tool install "git+https://github.com/Daniil-Danone/ansible-deploy.git@v0.1.0"
+ansible-deploy --version
 cd /path/to/application
-deploy project init
-deploy secrets path
-deploy images publish stage --registry ghcr --namespace OWNER --ask-token
-deploy stage
-deploy status stage
+ansible-deploy project init
+ansible-deploy secrets path
+ansible-deploy images publish stage --registry ghcr --namespace OWNER --ask-token
+ansible-deploy stage
+ansible-deploy status stage
 ```
+
+CLI ставится глобально через [uv](https://docs.astral.sh/uv/) прямо из приватного
+репозитория, с закреплённым тегом релиза; доступ берётся из ваших Git credentials.
+Через SSH: `uv tool install "git+ssh://git@github.com/Daniil-Danone/ansible-deploy.git@v0.1.0"`.
+Обновление, установка из wheel релиза и pipx — в [руководстве по обновлению](docs/guides/upgrading.md).
+Старое имя команды `deploy` остаётся алиасом `ansible-deploy`.
 
 После `project init` замените example host/domain/fingerprint и Compose. Реальные
 `app.env`, registry credentials, SSH private keys, backup credentials и age identity
-создавайте только во внешнем каталоге, который печатает `deploy secrets path`.
+создавайте только во внешнем каталоге, который печатает `ansible-deploy secrets path`.
 `.deploy/` целиком предназначен для commit-safe конфигурации.
 
 Полная последовательность с Production, Monitoring, backup и диагностикой:

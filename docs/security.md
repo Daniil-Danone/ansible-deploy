@@ -1,23 +1,30 @@
 # Безопасность
 
-- Получайте SSH fingerprint только out-of-band через консоль провайдера.
-- Не коммитьте `.deploy-state`, private keys, `app.env`, registry auth, monitoring env
-  и collector password-файлы.
-- Для VPS используйте отдельный read-only registry token, не publish token.
-- Base64 в Docker auth не шифрует credential; защищайте файл ACL/mode и backup.
-- Разделяйте Stage/Prod серверы, domains, env, Compose, remote dirs и желательно keys.
-- Пользователь `deploy` привилегирован: NOPASSWD sudo и Docker group эквивалентны
-  значительному root-доступу.
-- Root password login после bootstrap отключается, но root account не блокируется.
-- UFW может заменить прежние правила. Bootstrap предназначен для dedicated VPS.
-- Secret values редактируются в runtime output, sensitive Ansible tasks используют
-  `no_log`, однако не публикуйте полные diagnostic logs без просмотра.
-- Digest защищает точность image, но не доказывает безопасность содержимого: сканируйте
-  dependencies/images и защищайте registry account MFA.
-- Loki/Grafana raw-порты слушают только `127.0.0.1`; наружу доступен Nginx 443.
-  Loki push требует Basic Auth, Grafana — собственную admin-аутентификацию.
-- Grafana admin password ротируется через HTTPS UI с временным проверенным Server Admin;
-  не передавайте новый пароль через `grafana cli` argument или shell history.
+- `.deploy/` commit-safe; реальные secrets и private keys находятся только во внешнем
+  project-scoped store из `deploy secrets path`.
+- Не передавайте secrets через arguments, Compose YAML, GitHub artifacts, job summary
+  или `set -x`. Base64 — encoding, не encryption.
+- Schema v2 ограничивает sensitive paths внешним root и проверяет type, owner,
+  permissions, hardlink и symlink/reparse traversal непосредственно перед use.
+- Для Stage, Production, Monitoring и Restore используйте разные SSH/registry/runtime
+  credentials. Registry pull token должен быть read-only.
+- SSH host fingerprints получайте по доверенному каналу. Private key не копируется на
+  server; bootstrap password не сохраняется.
+- Production images закрепляются digest; deployment version — полный/допустимый Git
+  SHA. Production operation требует confirmation или protected CI Environment.
+- Backup encrypted age identity и rclone credentials находятся во внешнем store;
+  Restore Drill всегда использует отдельный target.
+- В GitHub Actions выдавайте минимальные `contents: read`/`packages: read`, pin tool
+  полным SHA, храните environment secrets отдельно и всегда удаляйте runner temp store.
 
-CLI не является secrets manager, PKI или backup системой. Ротацию tokens/keys,
-off-site backup и проверку восстановления планируйте отдельно.
+Перед commit:
+
+```bash
+git status --short
+git diff --check
+git grep -n -E 'BEGIN .*PRIVATE KEY|registry-auth|GF_SECURITY_ADMIN_PASSWORD='
+```
+
+Последний grep — эвристика, а не гарантия. При утечке удаление файла новым commit
+недостаточно: отзовите credential, очистите историю согласованным способом и выдайте
+новый secret.

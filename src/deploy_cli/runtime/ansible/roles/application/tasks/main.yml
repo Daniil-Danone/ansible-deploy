@@ -139,22 +139,83 @@
     group: "{{ deploy_user }}"
   when: not ansible_check_mode
 
-- name: Reconcile candidate application services
-  community.docker.docker_compose_v2:
-    project_src: "{{ app_dir }}/candidate"
-    files: [compose.yml]
-    env_files: [.env]
-    project_name: "{{ app_compose_project }}"
-    pull: always
-    state: present
-    remove_orphans: true
-    wait: true
-    wait_timeout: 120
-  become_user: "{{ deploy_user }}"
-  become: true
-  no_log: true
-  register: candidate_compose
+- name: Reconcile candidate application services with safe failure diagnostics
   when: not ansible_check_mode
+  block:
+    - name: Validate candidate Compose configuration safely
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - "{{ app_dir }}/candidate"
+          - -f
+          - "{{ app_dir }}/candidate/compose.yml"
+          - -p
+          - "{{ app_compose_project }}"
+          - config
+          - --quiet
+      become_user: "{{ deploy_user }}"
+      become: true
+      changed_when: false
+      failed_when: false
+      no_log: true
+      register: candidate_compose_preflight
+
+    - name: Reject invalid candidate Compose configuration
+      ansible.builtin.fail:
+        msg: >-
+          Candidate Compose configuration validation failed
+          (code {{ candidate_compose_preflight.rc }})
+      when: candidate_compose_preflight.rc != 0
+
+    - name: Reconcile candidate application services
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}/candidate"
+        files: [compose.yml]
+        env_files: [.env]
+        project_name: "{{ app_compose_project }}"
+        pull: always
+        state: present
+        remove_orphans: true
+        wait: true
+        wait_timeout: 120
+      become_user: "{{ deploy_user }}"
+      become: true
+      no_log: true
+      register: candidate_compose
+  rescue:
+    - name: Preserve safe candidate reconciliation reason
+      ansible.builtin.set_fact:
+        candidate_compose_failure_reason: >-
+          {{ ansible_failed_result.msg
+          if ansible_failed_task.name == 'Reject invalid candidate Compose configuration'
+          else 'Candidate Compose image pull or daemon reconciliation failed'
+          }}
+        candidate_compose_failure_rc: >-
+          {{ candidate_compose_preflight.rc
+          if ansible_failed_task.name == 'Reject invalid candidate Compose configuration'
+          else ansible_failed_result.rc | default('unknown') }}
+
+    - name: Collect candidate diagnostics without masking the original failure
+      block:
+        - name: Diagnose failed candidate services
+          ansible.builtin.include_role:
+            name: compose_diagnostics
+          vars:
+            compose_diagnostics_dir: "{{ app_dir }}/candidate"
+            compose_diagnostics_project: "{{ app_compose_project }}"
+            compose_diagnostics_user: "{{ deploy_user }}"
+      rescue:
+        - name: Report unavailable candidate diagnostics
+          ansible.builtin.debug:
+            msg: "Safe candidate Compose diagnostics are unavailable"
+
+    - name: Preserve candidate reconciliation failure
+      ansible.builtin.fail:
+        msg: >-
+          {{ candidate_compose_failure_reason }}
+          (code {{ candidate_compose_failure_rc }}); safe diagnostics are shown above
 
 - name: Require every candidate service to be running and healthy
   ansible.builtin.assert:

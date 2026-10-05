@@ -54,21 +54,81 @@
         owner: "{{ deploy_user }}"
         group: "{{ deploy_user }}"
 
-    - name: Reconcile rollback candidate without pulling images
-      community.docker.docker_compose_v2:
-        project_src: "{{ app_dir }}/candidate"
-        files: [compose.yml]
-        env_files: [.env]
-        project_name: "{{ app_compose_project }}"
-        pull: never
-        state: present
-        remove_orphans: true
-        wait: true
-        wait_timeout: 120
-      become_user: "{{ deploy_user }}"
-      become: true
-      no_log: true
-      register: rollback_compose
+    - name: Reconcile rollback candidate with safe failure diagnostics
+      block:
+        - name: Validate rollback Compose configuration safely
+          ansible.builtin.command:
+            argv:
+              - docker
+              - compose
+              - --project-directory
+              - "{{ app_dir }}/candidate"
+              - -f
+              - "{{ app_dir }}/candidate/compose.yml"
+              - -p
+              - "{{ app_compose_project }}"
+              - config
+              - --quiet
+          become_user: "{{ deploy_user }}"
+          become: true
+          changed_when: false
+          failed_when: false
+          no_log: true
+          register: rollback_compose_preflight
+
+        - name: Reject invalid rollback Compose configuration
+          ansible.builtin.fail:
+            msg: >-
+              Rollback Compose configuration validation failed
+              (code {{ rollback_compose_preflight.rc }})
+          when: rollback_compose_preflight.rc != 0
+
+        - name: Reconcile rollback candidate without pulling images
+          community.docker.docker_compose_v2:
+            project_src: "{{ app_dir }}/candidate"
+            files: [compose.yml]
+            env_files: [.env]
+            project_name: "{{ app_compose_project }}"
+            pull: never
+            state: present
+            remove_orphans: true
+            wait: true
+            wait_timeout: 120
+          become_user: "{{ deploy_user }}"
+          become: true
+          no_log: true
+          register: rollback_compose
+      rescue:
+        - name: Preserve safe rollback reconciliation reason
+          ansible.builtin.set_fact:
+            rollback_compose_failure_reason: >-
+              {{ ansible_failed_result.msg
+              if ansible_failed_task.name == 'Reject invalid rollback Compose configuration'
+              else 'Rollback Compose daemon reconciliation failed' }}
+            rollback_compose_failure_rc: >-
+              {{ rollback_compose_preflight.rc
+              if ansible_failed_task.name == 'Reject invalid rollback Compose configuration'
+              else ansible_failed_result.rc | default('unknown') }}
+
+        - name: Collect rollback diagnostics without masking the original failure
+          block:
+            - name: Diagnose failed rollback services
+              ansible.builtin.include_role:
+                name: compose_diagnostics
+              vars:
+                compose_diagnostics_dir: "{{ app_dir }}/candidate"
+                compose_diagnostics_project: "{{ app_compose_project }}"
+                compose_diagnostics_user: "{{ deploy_user }}"
+          rescue:
+            - name: Report unavailable rollback diagnostics
+              ansible.builtin.debug:
+                msg: "Safe rollback Compose diagnostics are unavailable"
+
+        - name: Preserve rollback reconciliation failure
+          ansible.builtin.fail:
+            msg: >-
+              {{ rollback_compose_failure_reason }}
+              (code {{ rollback_compose_failure_rc }}); safe diagnostics are shown above
 
     - name: Require every rollback service to be running and healthy
       ansible.builtin.assert:

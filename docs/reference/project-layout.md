@@ -1,38 +1,39 @@
-# Структура проекта
+# Структура application repository
 
 ```text
-my-app/
+application/
 ├── .deploy/
+│   ├── project-id                 # committed stable UUID
+│   ├── template-state.yml         # scaffold version + hashes
 │   ├── config/global.yml
 │   ├── images.yml
-│   ├── keys/                         # ignored
 │   └── environments/
-│       ├── stage/
-│       │   ├── config.yml
-│       │   ├── app.env               # ignored
-│       │   └── registry-auth.json     # ignored
-│       └── prod/...
-├── .deploy-state/                    # ignored, inventory/known_hosts
+│       ├── stage/config.yml
+│       ├── prod/config.yml
+│       ├── monitoring/config.yml
+│       └── restore/config.yml
 ├── deploy/
 │   ├── compose.stage.yml
-│   └── compose.prod.yml
-├── backend/
-└── frontend/
+│   ├── compose.prod.yml
+│   └── compose.restore.yml
+└── application source
 ```
 
-Добавьте в `.gitignore`:
+Все перечисленное commit-safe. `.env.example` может содержать только имена и
+нерабочие placeholders. Запрещены реальные `app.env`, private keys,
+`registry-auth.json`, collector passwords, Grafana/Loki credentials, rclone config и
+age identity.
 
-```gitignore
-.deploy-state/
-.deploy/keys/
-.deploy/environments/*/app.env
-.deploy/environments/*/registry-auth.json
-*.ansible-deploy.lock
+Внешний store определяется committed `.deploy/project-id`, поэтому clone/move не меняет
+namespace. Пример логической структуры root:
+
+```text
+<external-root>/
+├── environments/{stage,prod,monitoring,restore}/...
+├── keys/{stage,prod,monitoring,restore}_ed25519
+└── backup/{rclone.conf,age.key}
 ```
 
-`.deploy/` не может быть symlink. Relative application paths должны оставаться внутри
-project root. Secret registry auth обязан находиться внутри проекта и не может совпадать
-с Compose, env, keys или configs. Lock-файлы publisher можно оставить ignored.
-
-Legacy `config/` + `environments/` в корне распознаются только ради совместимости;
-новые проекты должны использовать `.deploy/`.
+`.deploy-state/` — локальное несекретное execution state/history, оно не коммитится.
+Упакованный Ansible runtime принадлежит установленному CLI, а не копируется в каждое
+application repository.

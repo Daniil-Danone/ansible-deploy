@@ -272,6 +272,9 @@ def _pull_credentials(
     return None
 
 
+DOCKER_DIAGNOSTIC_LINES = 20
+
+
 def _docker(
     arguments: list[str],
     project: Path,
@@ -293,8 +296,24 @@ def _docker(
     except (OSError, subprocess.SubprocessError):
         raise RunnerError("Unable to run Docker safely", 5) from None
     if result.returncode != 0:
-        raise RunnerError("Docker command failed; diagnostic output was suppressed", 5)
+        raise RunnerError(_docker_failure(arguments, result, redactor), 5)
     return result
+
+
+def _docker_failure(
+    arguments: list[str],
+    result: subprocess.CompletedProcess[str],
+    redactor: Redactor,
+) -> str:
+    command = " ".join(arguments[:3])
+    detail = redactor(result.stderr or result.stdout or "").strip()
+    lines = [line for line in detail.splitlines() if line.strip()]
+    summary = f"docker {command} failed with exit code {result.returncode}"
+    if not lines:
+        return summary
+    tail = lines[-DOCKER_DIAGNOSTIC_LINES:]
+    report = "\n".join(f"  {line}" for line in tail)
+    return f"{summary}:\n{report}"
 
 
 def _push_digest(result: subprocess.CompletedProcess[str]) -> str:

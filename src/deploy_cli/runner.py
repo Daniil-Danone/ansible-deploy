@@ -60,7 +60,7 @@ class AnsibleRunner:
         self.external_trusted_base = external_trusted_base
         self.validate_external_trusted_base = validate_external_trusted_base
         self._pending_external_mounts: list[tuple[str, Path, bool]] = []
-        self.runtime_image = _runtime_image_reference(_resource_tree_hash(runtime_resources()))
+        self.runtime_image = runtime_image_reference()
 
     def build_image(self) -> None:
         runtime_hash = _resource_tree_hash(runtime_resources())
@@ -443,6 +443,11 @@ def _fingerprint(known_host_line: str) -> str:
 
 def _runtime_image_reference(runtime_hash: str) -> str:
     return f"{RUNTIME_IMAGE_REPOSITORY}:runtime-{runtime_hash}"
+
+
+def runtime_image_reference() -> str:
+    """Return the immutable image reference for the packaged runtime assets."""
+    return _runtime_image_reference(_resource_tree_hash(runtime_resources()))
 
 
 def _bounded_line(line: str) -> str:

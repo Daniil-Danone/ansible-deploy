@@ -6,7 +6,8 @@ import os
 import shutil
 import stat
 import tarfile
-from pathlib import Path
+from contextlib import nullcontext
+from pathlib import Path, PurePosixPath
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -367,7 +368,11 @@ def test_remote_list_requires_valid_manifest_and_complete_set(
             "size": 10,
         },
     )
-    monkeypatch.setattr(runtime, "_read_remote_text", lambda config, name: "a" * 64)
+    monkeypatch.setattr(
+        runtime,
+        "_read_remote_text",
+        lambda config, name: f"{'a' * 64}  {complete}.tar.gz.age\n",
+    )
     monkeypatch.setattr(runtime, "_remote_size", lambda config, name: 10)
 
     assert runtime.remote_ids({"remote": "drive:backups"}) == [complete]
@@ -422,6 +427,279 @@ def test_new_backup_ids_have_nonce_and_are_unique(monkeypatch: pytest.MonkeyPatc
     assert first != second
     assert runtime._valid_id(first)
     assert runtime._valid_id(second)
+
+
+def test_archive_source_mapping_survives_config_reorder_add_and_remove(tmp_path: Path) -> None:
+    runtime = _runtime()
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    sources = [
+        {"type": "file", "path": str(first), "restore_destination": "data/first.txt"},
+        {"type": "file", "path": str(second), "restore_destination": "data/second.txt"},
+    ]
+    archive_path = tmp_path / "backup.tar.gz"
+    runtime.create_archive({"compose_file": "/unused", "include": sources}, archive_path)
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = runtime.safe_members(archive)
+        source_map = runtime._load_source_map(archive, members)
+        runtime._validate_mapped_members(members, source_map)
+        changed_config = {
+            "restore_root": str(tmp_path / "restore"),
+            "include": [
+                {"type": "file", "path": "/new", "restore_destination": "wrong"},
+                *reversed(sources),
+            ],
+        }
+        destinations = {
+            Path(member.name).name: runtime._member_destination(
+                changed_config, source_map[PurePosixPath(member.name).parts[1]], member
+            )
+            for member in members
+            if PurePosixPath(member.name).parts[0] == "files"
+        }
+
+    assert destinations == {
+        "first.txt": tmp_path / "restore/data/first.txt",
+        "second.txt": tmp_path / "restore/data/second.txt",
+    }
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        None,
+        b"not-json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "sources": [
+                    {"id": "a" * 32, "type": "file", "restore_destination": "../prod"}
+                ],
+            }
+        ).encode(),
+    ],
+)
+def test_archive_source_mapping_missing_or_tampered_is_rejected(
+    tmp_path: Path, mapping: bytes | None
+) -> None:
+    runtime = _runtime()
+    archive_path = tmp_path / "mapping.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        if mapping is not None:
+            member = tarfile.TarInfo(runtime.ARCHIVE_MAPPING)
+            member.size = len(mapping)
+            member.mode = 0o600
+            archive.addfile(member, io.BytesIO(mapping))
+    with tarfile.open(archive_path) as archive:
+        members = runtime.safe_members(archive)
+        with pytest.raises(runtime.BackupFailure, match="mapping"):
+            runtime._load_source_map(archive, members)
+
+
+def test_post_archive_validation_rejects_raced_symlink_before_age_or_upload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _runtime()
+    calls: list[object] = []
+
+    def unsafe_archive(config: dict[str, object], destination: Path) -> None:
+        with tarfile.open(destination, "w:gz") as archive:
+            mapping = json.dumps(
+                {
+                    "schema_version": 1,
+                    "sources": [
+                        {"id": "a" * 32, "type": "file", "restore_destination": "data/x"}
+                    ],
+                }
+            ).encode()
+            mapped = tarfile.TarInfo(runtime.ARCHIVE_MAPPING)
+            mapped.size = len(mapping)
+            archive.addfile(mapped, io.BytesIO(mapping))
+            link = tarfile.TarInfo(f"files/{'a' * 32}/0/x")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "/etc/shadow"
+            archive.addfile(link)
+
+    monkeypatch.setattr(runtime, "_backup_lock", lambda config: nullcontext())
+    monkeypatch.setattr(runtime, "create_archive", unsafe_archive)
+    monkeypatch.setattr(runtime, "run", lambda *args, **kwargs: calls.append(args) or "")
+    monkeypatch.setattr(runtime, "_rclone", lambda *args: calls.append(args) or "[]")
+    monkeypatch.setattr(runtime, "_delete_quiet", lambda *args: None)
+    config = {
+        "age_recipient": "age1" + "a" * 58,
+        "include": [{"type": "file", "path": "/unused", "restore_destination": "data/x"}],
+        "remote": "drive:backup",
+        "retention": {"daily": 1, "weekly": 0, "monthly": 0},
+        "result_file": str(tmp_path / "result.json"),
+    }
+
+    with pytest.raises(runtime.BackupFailure, match="unsafe"):
+        runtime.backup(config)
+    assert calls == []
+
+
+def test_restore_open_race_does_not_truncate_hardlinked_victim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _runtime()
+    victim = tmp_path / "victim"
+    target = tmp_path / "target"
+    victim.write_text("do-not-truncate", encoding="utf-8")
+    target.write_text("safe-before-race", encoding="utf-8")
+    archive_path = tmp_path / "archive.tar"
+    member = tarfile.TarInfo("files/0/0/source")
+    member.size = 3
+    with tarfile.open(archive_path, "w") as archive:
+        archive.addfile(member, io.BytesIO(b"new"))
+    original_open = runtime.os.open
+
+    def raced_open(path: Path, flags: int, mode: int) -> int:
+        Path(path).unlink()
+        os.link(victim, path)
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(runtime.os, "open", raced_open)
+    with tarfile.open(archive_path) as archive:
+        with pytest.raises(runtime.BackupFailure, match="safe regular file"):
+            runtime._restore_file(archive, archive.getmembers()[0], target)
+    assert victim.read_text(encoding="utf-8") == "do-not-truncate"
+
+
+def test_postgres_readiness_retries_before_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    attempts = 0
+    sleeps: list[int] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise runtime.BackupFailure("initializing")
+        return ""
+
+    monkeypatch.setattr(runtime, "run", fake_run)
+    monkeypatch.setattr(runtime.time, "sleep", sleeps.append)
+    runtime._wait_for_postgres(
+        {"compose_file": "/srv/restore/current/compose.yml"},
+        {"service": "db", "user": "app", "database": "app"},
+    )
+
+    assert attempts == 3
+    assert sleeps == [2, 2]
+
+
+@pytest.mark.parametrize("sidecar", [None, "", "garbage", "a" * 64, "z" * 64 + "  x\n"])
+def test_malformed_checksum_sidecar_is_rejected(sidecar: str | None) -> None:
+    runtime = _runtime()
+    assert runtime._parse_sidecar(sidecar, "backup.tar.gz.age") is None
+
+
+def test_retention_failure_keeps_completed_current_backup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _runtime()
+    source = tmp_path / "source"
+    source.write_text("payload", encoding="utf-8")
+    uploaded: list[str] = []
+    deleted: list[str] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> str:
+        if command[0] == "age":
+            shutil.copyfile(command[-1], command[command.index("-o") + 1])
+        return ""
+
+    monkeypatch.setattr(runtime, "_backup_lock", lambda config: nullcontext())
+    monkeypatch.setattr(runtime, "run", fake_run)
+    monkeypatch.setattr(
+        runtime, "upload_verified", lambda config, local, name: uploaded.append(name)
+    )
+    monkeypatch.setattr(
+        runtime,
+        "apply_retention",
+        lambda config, current=None: (_ for _ in ()).throw(runtime.BackupFailure("retention")),
+    )
+    monkeypatch.setattr(
+        runtime, "_delete_quiet", lambda config, name: deleted.append(name)
+    )
+    config = {
+        "age_recipient": "age1" + "a" * 58,
+        "compose_file": "/unused",
+        "include": [
+            {
+                "type": "file",
+                "path": str(source),
+                "restore_destination": "data/source",
+            }
+        ],
+        "remote": "drive:backup",
+        "retention": {"daily": 1, "weekly": 0, "monthly": 0},
+        "result_file": str(tmp_path / "result.json"),
+    }
+
+    with pytest.raises(runtime.BackupFailure, match="retention"):
+        runtime.backup(config)
+    assert [Path(name).suffix for name in uploaded] == [".age", ".sha256", ".json"]
+    assert deleted == []
+
+
+def test_retention_removes_completion_marker_before_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    old = "2026-09-01T010203Z-0123456789abcdef"
+    current = "2026-10-01T010203Z-fedcba9876543210"
+    calls: list[str] = []
+    monkeypatch.setattr(runtime, "remote_ids", lambda config: [old, current])
+
+    def fail_mid_delete(config: dict[str, object], *arguments: str) -> str:
+        calls.append(arguments[1])
+        if len(calls) == 2:
+            raise runtime.BackupFailure("remote delete failed")
+        return ""
+
+    monkeypatch.setattr(runtime, "_rclone", fail_mid_delete)
+    config = {
+        "remote": "drive:backup",
+        "retention": {"daily": 0, "weekly": 0, "monthly": 1},
+    }
+
+    with pytest.raises(runtime.BackupFailure, match="remote delete"):
+        runtime.apply_retention(config, current=current)
+    assert calls == [
+        f"drive:backup/{old}.json",
+        f"drive:backup/{old}.tar.gz.age",
+    ]
+
+
+def test_remote_list_ignores_empty_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = _runtime()
+    identifier = "2026-10-05T010203Z-0123456789abcdef"
+    monkeypatch.setattr(
+        runtime,
+        "_remote_names",
+        lambda config: {
+            f"{identifier}.json",
+            f"{identifier}.tar.gz.age",
+            f"{identifier}.tar.gz.age.sha256",
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_read_remote_json",
+        lambda config, name: {
+            "artifact": f"{identifier}.tar.gz.age",
+            "backup_id": identifier,
+            "sha256": "a" * 64,
+            "size": 1,
+        },
+    )
+    monkeypatch.setattr(runtime, "_read_remote_text", lambda config, name: "")
+    assert runtime.remote_ids({"remote": "drive:backup"}) == []
 
 
 def test_cli_rejects_production_restore_target_with_exit_8(

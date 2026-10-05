@@ -9,6 +9,7 @@ from deploy_cli.models import BackupConfig
 from deploy_cli.project import sync_project
 from deploy_cli.runner import RunnerError
 from deploy_cli.workflow import (
+    backup_operation,
     deploy,
     deploy_collector,
     deploy_monitoring,
@@ -102,7 +103,7 @@ def test_restore_prepares_target_before_import_and_rechecks_health(tmp_path: Pat
         {
             "type": "directory",
             "path": "/srv/myapp-prod/shared/uploads",
-            "restore_destination": "/srv/myapp-restore/shared/uploads",
+            "restore_destination": "shared/uploads",
         }
     ]
 
@@ -195,6 +196,38 @@ def test_restore_rejects_unsafe_backup_id_before_runner_calls() -> None:
 
     runner.assert_not_called()
     runner.playbook.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["run", "list"])
+def test_backup_operations_converge_runtime_and_credentials(
+    tmp_path: Path, action: str
+) -> None:
+    repo = Path(__file__).parents[1]
+    global_config, config = load_configuration(repo, "prod")
+    credentials = tmp_path / "rclone.conf"
+    config.backup = BackupConfig.model_validate(
+        {
+            "remote": "drive:backups",
+            "credentials_file": str(credentials),
+            "age_identity_file": str(tmp_path / "age.key"),
+            "age_recipient": "age1" + "a" * 58,
+            "include": [
+                {
+                    "type": "file",
+                    "path": "/srv/myapp-prod/data",
+                    "restore_destination": "data",
+                }
+            ],
+        }
+    )
+    runner = Mock()
+
+    backup_operation(repo, global_config, config, runner, action=action)
+
+    backup_call = runner.playbook.call_args_list[-1]
+    assert backup_call.args[0] == "backup.yml"
+    assert backup_call.kwargs["backup_credentials_file"] == credentials
+    assert backup_call.args[2]["backup_action"] == action
 
 
 def test_production_uses_separate_compose_project_name(tmp_path: Path) -> None:

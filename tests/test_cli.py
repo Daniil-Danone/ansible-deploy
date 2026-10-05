@@ -8,6 +8,7 @@ import yaml
 
 from deploy_cli import cli
 from deploy_cli.cli import run
+from deploy_cli.redaction import Redactor
 from deploy_cli.runner import RunnerError
 
 
@@ -53,6 +54,26 @@ def test_operation_redactor_hides_synthetic_failure_secrets(
 
     assert secret not in failure
     assert "[REDACTED]" in failure
+
+
+def test_backup_secret_fragments_redact_synthetic_runtime_failure() -> None:
+    rclone = "client_id=id-public\nclient_secret=very-private-rclone-token\n"
+    identity = "AGE-SECRET-KEY-1VERYPRIVATEIDENTITY"
+    registry = {"auths": {"registry.example.com": {"auth": "private-registry-auth"}}}
+    secrets = cli._secret_text_fragments(rclone)
+    secrets.update(cli._secret_text_fragments(identity))
+    secrets.update(cli._string_values(registry))
+    redactor = Redactor(secrets)
+
+    safe = redactor(
+        "compose failed: very-private-rclone-token "
+        "AGE-SECRET-KEY-1VERYPRIVATEIDENTITY private-registry-auth"
+    )
+
+    assert "very-private-rclone-token" not in safe
+    assert "AGE-SECRET-KEY-1VERYPRIVATEIDENTITY" not in safe
+    assert "private-registry-auth" not in safe
+    assert safe.count("[REDACTED]") == 3
 
 
 def test_missing_local_files_return_configuration_exit_code(tmp_path: Path) -> None:

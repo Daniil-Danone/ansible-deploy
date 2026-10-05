@@ -13,7 +13,7 @@
       - rclone
     state: present
     update_cache: true
-  when: backup_action in ['setup', 'restore']
+  when: backup_action in ['setup', 'run', 'list', 'restore']
 
 - name: Create protected backup directories
   ansible.builtin.file:
@@ -33,7 +33,7 @@
     owner: root
     group: root
     mode: "0700"
-  when: backup_action in ['setup', 'restore']
+  when: backup_action in ['setup', 'run', 'list', 'restore']
 
 - name: Install protected rclone configuration
   ansible.builtin.copy:
@@ -43,7 +43,7 @@
     group: root
     mode: "0600"
   no_log: true
-  when: backup_action in ['setup', 'restore']
+  when: backup_action in ['setup', 'run', 'list', 'restore']
 
 - name: Install non-secret backup configuration
   ansible.builtin.copy:
@@ -52,7 +52,7 @@
     group: root
     mode: "0600"
     content: "{{ backup_runtime_config | to_nice_json }}\n"
-  when: backup_action in ['setup', 'restore']
+  when: backup_action in ['setup', 'run', 'list', 'restore']
 
 - name: Install scheduled backup service
   ansible.builtin.copy:

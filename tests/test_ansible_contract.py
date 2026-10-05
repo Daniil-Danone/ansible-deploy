@@ -241,3 +241,20 @@ def test_observability_playbooks_are_separate_from_application_release_flow() ->
         assert "role: application" not in content
         assert "release_finalize" not in content
         assert "release_restore" not in content
+
+
+def test_backup_every_operation_converges_runtime_config_and_credentials() -> None:
+    tasks = _text("ansible/roles/backup/tasks/main.yml")
+    converge_guard = "backup_action in ['setup', 'run', 'list', 'restore']"
+
+    assert tasks.count(converge_guard) >= 4
+
+
+def test_restore_application_preflights_compose_and_preserves_original_failure() -> None:
+    tasks = _text("ansible/roles/restore_application/tasks/main.yml")
+
+    assert "config\n          - --quiet" in tasks
+    assert "failed_when: false" in tasks
+    assert "restore_preparation_failure" in tasks
+    assert "Secondary Restore diagnostics failed" in tasks
+    assert "wait: false" in tasks

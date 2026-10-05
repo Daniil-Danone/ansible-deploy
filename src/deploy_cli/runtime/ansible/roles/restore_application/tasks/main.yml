@@ -46,8 +46,35 @@
     mode: "0600"
   no_log: true
 
-- name: Start Restore services without application health gating
+- name: Validate and start Restore services without application health gating
   block:
+    - name: Validate Restore Compose configuration without rendering secrets
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-directory
+          - "{{ app_dir }}/current"
+          - --env-file
+          - "{{ app_dir }}/current/.env"
+          - -f
+          - "{{ app_dir }}/current/compose.yml"
+          - config
+          - --quiet
+      become_user: "{{ deploy_user }}"
+      become: true
+      register: restore_compose_config
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Require valid Restore Compose configuration
+      ansible.builtin.assert:
+        that: restore_compose_config.rc == 0
+        fail_msg: >-
+          Restore Compose configuration validation failed
+          (rc={{ restore_compose_config.rc }})
+
     - name: Reconcile Restore services for data import
       community.docker.docker_compose_v2:
         project_src: "{{ app_dir }}/current"
@@ -62,14 +89,26 @@
       become: true
       no_log: true
   rescue:
-    - name: Diagnose failed Restore service preparation
-      ansible.builtin.include_role:
-        name: compose_diagnostics
-      vars:
-        compose_diagnostic_dir: "{{ app_dir }}/current"
-        compose_diagnostic_project: "{{ app_compose_project }}"
-        compose_diagnostic_user: "{{ deploy_user }}"
+    - name: Preserve sanitized Restore preparation failure
+      ansible.builtin.set_fact:
+        restore_preparation_failure: >-
+          Restore service preparation failed at {{ ansible_failed_task.name }}
+          (rc={{ restore_compose_config.rc | default('unavailable') }})
+
+    - name: Collect Restore preparation diagnostics without masking failure
+      block:
+        - name: Diagnose failed Restore service preparation
+          ansible.builtin.include_role:
+            name: compose_diagnostics
+          vars:
+            compose_diagnostic_dir: "{{ app_dir }}/current"
+            compose_diagnostic_project: "{{ app_compose_project }}"
+            compose_diagnostic_user: "{{ deploy_user }}"
+      rescue:
+        - name: Report unavailable secondary Restore diagnostics
+          ansible.builtin.debug:
+            msg: Secondary Restore diagnostics failed; preserving the original failure
 
     - name: Preserve Restore service preparation failure
       ansible.builtin.fail:
-        msg: "Restore Compose preparation failed; safe diagnostics are shown above"
+        msg: "{{ restore_preparation_failure }}"

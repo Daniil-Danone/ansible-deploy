@@ -253,6 +253,49 @@ def _prompt_bootstrap_password(user: str, host: str) -> str:
     return password
 
 
+def _string_values(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {value} if value else set()
+    if isinstance(value, dict):
+        return set().union(*(_string_values(item) for item in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_string_values(item) for item in value))
+    return set()
+
+
+def _secret_text_fragments(value: str) -> set[str]:
+    fragments = {value.strip()} if value.strip() else set()
+    for line in value.splitlines():
+        stripped = line.strip()
+        if stripped:
+            fragments.add(stripped)
+        if "=" in stripped:
+            _, secret = stripped.split("=", 1)
+            if secret:
+                fragments.add(secret)
+    return fragments
+
+
+def _operation_secrets(config: EnvironmentConfig) -> set[str]:
+    values = {str(config.server.ssh_key), str(config.application.env_file)}
+    env_text = read_external_secret_text(
+        config, config.application.env_file, field="application environment"
+    )
+    values.update(secrets_from_env(env_text))
+    registry = config.application.registry_auth_file
+    if registry is not None:
+        values.add(str(registry))
+        registry_text = read_external_secret_text(
+            config, registry, field="registry authentication"
+        )
+        values.update(_secret_text_fragments(registry_text))
+        try:
+            values.update(_string_values(json.loads(registry_text)))
+        except json.JSONDecodeError:
+            pass
+    return values
+
+
 def _load_and_validate(
     repo: Path, environment: str, command: str, *, action: str | None = None
 ) -> tuple[GlobalConfig, EnvironmentConfig | MonitoringConfig]:
@@ -375,19 +418,27 @@ def run(argv: list[str] | None = None) -> int:
                     )
                     active = source
                 backup_bootstrap_password: str | None = None
-                backup_secret_values: set[str] = set()
+                backup_secret_values: set[str] = (
+                    _operation_secrets(active) if args.backup_command == "restore" else set()
+                )
                 if args.backup_command == "restore":
                     if args.ask_bootstrap_password:
                         backup_bootstrap_password = _prompt_bootstrap_password(
                             active.server.bootstrap_user, active.server.host
                         )
                         backup_secret_values.add(backup_bootstrap_password)
-                    env_text = read_external_secret_text(
-                        active,
-                        active.application.env_file,
-                        field="application environment",
+                for field, path in (
+                    ("backup credentials", backup_config.credentials_file),
+                    ("age identity", backup_config.age_identity_file),
+                ):
+                    backup_secret_values.add(str(path))
+                    if field == "age identity" and args.backup_command != "restore":
+                        continue
+                    backup_secret_values.update(
+                        _secret_text_fragments(
+                            read_external_secret_text(source, path, field=field)
+                        )
                     )
-                    backup_secret_values.update(secrets_from_env(env_text))
                 external_context = active.external_secret_context
                 runner = AnsibleRunner(
                     project_dir,

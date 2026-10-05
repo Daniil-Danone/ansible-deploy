@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
@@ -27,6 +29,7 @@ BACKUP_ID_RE = re.compile(r"^(?P<stamp>\d{4}-\d{2}-\d{2}T\d{6}Z)(?:-[0-9a-f]{16}
 ARTIFACT_SUFFIX = ".tar.gz.age"
 SIDECAR_SUFFIX = f"{ARTIFACT_SUFFIX}.sha256"
 MANIFEST_SUFFIX = ".json"
+ARCHIVE_MAPPING = "metadata/source-map.json"
 
 
 class BackupFailure(RuntimeError):
@@ -141,30 +144,71 @@ def _source_entries(source: dict[str, Any]) -> list[tuple[Path, PurePosixPath]]:
     return entries
 
 
+def _source_id(source: dict[str, Any]) -> str:
+    declaration = json.dumps(source, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(declaration).hexdigest()[:32]
+
+
+def _archive_source_map(config: dict[str, Any]) -> dict[str, Any]:
+    sources: list[dict[str, Any]] = []
+    identifiers: set[str] = set()
+    for source in config["include"]:
+        identifier = _source_id(source)
+        if identifier in identifiers:
+            raise BackupFailure("backup source declarations must be unique")
+        identifiers.add(identifier)
+        if source["type"] == "postgres":
+            mapped = {
+                "database": source["database"],
+                "id": identifier,
+                "service": source["service"],
+                "type": "postgres",
+                "user": source["user"],
+            }
+        else:
+            mapped = {
+                "id": identifier,
+                "restore_destination": source["restore_destination"],
+                "type": source["type"],
+            }
+        sources.append(mapped)
+    return {"schema_version": 1, "sources": sources}
+
+
 def create_archive(config: dict[str, Any], destination: Path) -> None:
     compose = config["compose_file"]
-    path_entries: dict[int, list[tuple[Path, PurePosixPath]]] = {}
-    for index, source in enumerate(config["include"]):
+    source_map = _archive_source_map(config)
+    path_entries: dict[str, list[tuple[Path, PurePosixPath]]] = {}
+    for source in config["include"]:
         if source["type"] != "postgres":
-            path_entries[index] = _source_entries(source)
+            path_entries[_source_id(source)] = _source_entries(source)
     with tempfile.TemporaryDirectory(prefix="ansible-deploy-backup-") as directory:
         workspace = Path(directory)
         with tarfile.open(destination, "w:gz", format=tarfile.PAX_FORMAT) as archive:
-            for index, source in enumerate(config["include"]):
+            mapping_bytes = (
+                json.dumps(source_map, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            mapping_member = tarfile.TarInfo(ARCHIVE_MAPPING)
+            mapping_member.size = len(mapping_bytes)
+            mapping_member.mode = 0o600
+            mapping_member.mtime = int(dt.datetime.now(dt.UTC).timestamp())
+            archive.addfile(mapping_member, io.BytesIO(mapping_bytes))
+            for source in config["include"]:
+                source_id = _source_id(source)
                 if source["type"] == "postgres":
-                    dump = workspace / f"{index}-{source['database']}.sql"
+                    dump = workspace / f"{source_id}.sql"
                     run([
                         "docker", "compose", "-f", compose, "exec", "-T",
                         source["service"], "pg_dump", "--clean", "--if-exists",
                         "--no-owner", "--no-privileges", "-U", source["user"],
                         "-d", source["database"],
                     ], stdout=dump)
-                    archive.add(dump, arcname=f"database/{index}-{source['database']}.sql")
+                    archive.add(dump, arcname=f"database/{source_id}.sql")
                     continue
-                for path, relative in path_entries[index]:
+                for path, relative in path_entries[source_id]:
                     archive.add(
                         path,
-                        arcname=str(PurePosixPath("files") / str(index) / relative),
+                        arcname=str(PurePosixPath("files") / source_id / relative),
                         recursive=False,
                     )
 
@@ -266,6 +310,15 @@ def _read_remote_text(config: dict[str, Any], name: str) -> str | None:
             return None
 
 
+def _parse_sidecar(value: str | None, artifact_name: str) -> str | None:
+    if value is None:
+        return None
+    match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._-]+)\r?\n?", value)
+    if match is None or match.group(2) != artifact_name:
+        return None
+    return match.group(1)
+
+
 def remote_ids(config: dict[str, Any]) -> list[str]:
     names = _remote_names(config)
     complete: list[str] = []
@@ -290,8 +343,10 @@ def remote_ids(config: dict[str, Any]) -> list[str]:
             or manifest["size"] <= 0
         ):
             continue
-        sidecar = _read_remote_text(config, sidecar_name)
-        if sidecar is None or sidecar.split()[0] != manifest["sha256"]:
+        sidecar_digest = _parse_sidecar(
+            _read_remote_text(config, sidecar_name), artifact_name
+        )
+        if sidecar_digest != manifest["sha256"]:
             continue
         try:
             if _remote_size(config, _remote_path(config, artifact_name)) != manifest["size"]:
@@ -310,7 +365,9 @@ def apply_retention(config: dict[str, Any], *, current: str | None = None) -> li
         keep.add(current)
     removed = [identifier for identifier in identifiers if identifier not in keep]
     for identifier in removed:
-        for suffix in (ARTIFACT_SUFFIX, SIDECAR_SUFFIX, MANIFEST_SUFFIX):
+        # Remove the completion marker first. Any later failure leaves a
+        # non-listable orphan, never a deceptively complete damaged backup.
+        for suffix in (MANIFEST_SUFFIX, ARTIFACT_SUFFIX, SIDECAR_SUFFIX):
             _rclone(config, "deletefile", _remote_path(config, f"{identifier}{suffix}"))
     return removed
 
@@ -358,12 +415,19 @@ def backup(config: dict[str, Any]) -> dict[str, Any]:
             f"{identifier}{SIDECAR_SUFFIX}",
             f"{identifier}{MANIFEST_SUFFIX}",
         )
+        completed = False
         try:
             with tempfile.TemporaryDirectory(prefix="ansible-deploy-backup-") as directory:
                 workspace = Path(directory)
                 archive = workspace / f"{identifier}.tar.gz"
                 encrypted = workspace / names[0]
                 create_archive(config, archive)
+                # Re-open and validate the finished archive. This closes the
+                # preflight-to-tar.add race before encryption or remote writes.
+                with tarfile.open(archive, "r:gz") as prepared:
+                    prepared_members = safe_members(prepared)
+                    prepared_map = _load_source_map(prepared, prepared_members)
+                    _validate_mapped_members(prepared_members, prepared_map)
                 run(["age", "-r", config["age_recipient"], "-o", str(encrypted), str(archive)])
                 digest = checksum(encrypted)
                 sidecar = workspace / names[1]
@@ -379,6 +443,7 @@ def backup(config: dict[str, Any]) -> dict[str, Any]:
                 upload_verified(config, encrypted, encrypted.name)
                 upload_verified(config, sidecar, sidecar.name)
                 upload_verified(config, manifest, manifest.name)
+                completed = True
                 removed = apply_retention(config, current=identifier)
                 return {
                     "backup_id": identifier, "sha256": digest,
@@ -386,9 +451,10 @@ def backup(config: dict[str, Any]) -> dict[str, Any]:
                     "retention_removed": removed, "status": "ok",
                 }
         except Exception:
-            for name in names:
-                _delete_quiet(config, name)
-                _delete_quiet(config, f".partial/{name}.partial")
+            if not completed:
+                for name in names:
+                    _delete_quiet(config, name)
+                    _delete_quiet(config, f".partial/{name}.partial")
             raise
 
 
@@ -396,9 +462,11 @@ def safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
     members = archive.getmembers()
     for member in members:
         path = PurePosixPath(member.name)
+        metadata_member = member.name == ARCHIVE_MAPPING and member.isfile()
         if (
             path.is_absolute() or ".." in path.parts or not path.parts
-            or path.parts[0] not in {"database", "files"}
+            or (path.parts[0] not in {"database", "files"} and not metadata_member)
+            or (path.parts[0] == "metadata" and not metadata_member)
             or not (member.isfile() or member.isdir())
             or member.uid < 0 or member.gid < 0
             or member.uid > 2**31 - 1 or member.gid > 2**31 - 1
@@ -406,6 +474,138 @@ def safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
         ):
             raise BackupFailure("archive contains an unsafe member or metadata")
     return members
+
+
+def _safe_relative_destination(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and value == str(path)
+        and value not in {"", "."}
+        and all(part not in {"", ".", ".."} for part in path.parts)
+    )
+
+
+def _load_source_map(
+    archive: tarfile.TarFile, members: list[tarfile.TarInfo]
+) -> dict[str, dict[str, Any]]:
+    mapping_members = [member for member in members if member.name == ARCHIVE_MAPPING]
+    if len(mapping_members) != 1 or mapping_members[0].size > 1024 * 1024:
+        raise BackupFailure("archive source mapping is missing or ambiguous")
+    stream = archive.extractfile(mapping_members[0])
+    if stream is None:
+        raise BackupFailure("archive source mapping is unreadable")
+    try:
+        document = json.loads(stream.read().decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BackupFailure("archive source mapping is malformed") from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema_version", "sources"}
+        or document.get("schema_version") != 1
+        or not isinstance(document.get("sources"), list)
+        or not document["sources"]
+    ):
+        raise BackupFailure("archive source mapping has an unsupported schema")
+    mapped: dict[str, dict[str, Any]] = {}
+    for source in document["sources"]:
+        if not isinstance(source, dict):
+            raise BackupFailure("archive source mapping contains an invalid entry")
+        identifier = source.get("id")
+        source_type = source.get("type")
+        if not isinstance(identifier, str) or re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
+            raise BackupFailure("archive source mapping contains an invalid identifier")
+        if identifier in mapped:
+            raise BackupFailure("archive source mapping contains duplicate identifiers")
+        if source_type == "postgres":
+            if (
+                set(source) != {"database", "id", "service", "type", "user"}
+                or not isinstance(source.get("service"), str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", source["service"])
+                is None
+                or any(
+                    not isinstance(source.get(field), str)
+                    or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$-]{0,62}", source[field])
+                    is None
+                    for field in ("database", "user")
+                )
+            ):
+                raise BackupFailure("archive PostgreSQL mapping is invalid")
+        elif source_type in {"file", "directory", "glob"}:
+            valid_destination = _safe_relative_destination(
+                source.get("restore_destination")
+            )
+            if set(source) != {"id", "restore_destination", "type"} or not valid_destination:
+                raise BackupFailure("archive file mapping is invalid")
+        else:
+            raise BackupFailure("archive source mapping contains an unsupported type")
+        mapped[identifier] = source
+    return mapped
+
+
+def _validate_mapped_members(
+    members: list[tarfile.TarInfo], source_map: dict[str, dict[str, Any]]
+) -> None:
+    represented: set[str] = set()
+    database_ids: set[str] = set()
+    member_names: set[str] = set()
+    destinations: set[tuple[str, str]] = set()
+    rooted_sources: set[str] = set()
+    for member in members:
+        path = PurePosixPath(member.name)
+        if member.name in member_names:
+            raise BackupFailure("archive contains duplicate member names")
+        member_names.add(member.name)
+        if path.parts[0] == "files":
+            if len(path.parts) < 4:
+                raise BackupFailure("archive file member has an invalid mapping")
+            source = source_map.get(path.parts[1])
+            if source is None or source["type"] == "postgres":
+                raise BackupFailure("archive file source identifier is unknown")
+            candidate = path.parts[2]
+            if not candidate.isdigit() or str(int(candidate)) != candidate:
+                raise BackupFailure("archive file candidate identifier is invalid")
+            relative = PurePosixPath(*path.parts[3:])
+            if source["type"] == "file":
+                if candidate != "0" or len(relative.parts) != 1 or not member.isfile():
+                    raise BackupFailure("archive file source has invalid contents")
+                destination_key = "."
+                rooted_sources.add(source["id"])
+            elif source["type"] == "directory":
+                if candidate != "0":
+                    raise BackupFailure("archive directory source has invalid contents")
+                destination_key = str(PurePosixPath(*relative.parts[1:]))
+                if destination_key == ".":
+                    if not member.isdir():
+                        raise BackupFailure("archive directory root is not a directory")
+                    rooted_sources.add(source["id"])
+            else:
+                destination_key = str(relative)
+            mapped_destination = (source["id"], destination_key)
+            if mapped_destination in destinations:
+                raise BackupFailure("archive file members collide at restore destination")
+            destinations.add(mapped_destination)
+            represented.add(source["id"])
+        elif path.parts[0] == "database":
+            if len(path.parts) != 2 or not path.name.endswith(".sql"):
+                raise BackupFailure("archive database member has an invalid mapping")
+            source_id = path.name[:-4]
+            source = source_map.get(source_id)
+            if source is None or source["type"] != "postgres" or source_id in database_ids:
+                raise BackupFailure("archive database source mapping is invalid")
+            database_ids.add(source_id)
+            represented.add(source_id)
+    if represented != set(source_map):
+        raise BackupFailure("archive contents do not match authenticated source mapping")
+    required_roots = {
+        identifier
+        for identifier, source in source_map.items()
+        if source["type"] in {"file", "directory"}
+    }
+    if rooted_sources != required_roots:
+        raise BackupFailure("archive is missing a mapped file or directory root")
 
 
 def _safe_destination(root: Path, relative: PurePosixPath) -> Path:
@@ -435,15 +635,11 @@ def _member_destination(
     config: dict[str, Any], source: dict[str, Any], member: tarfile.TarInfo
 ) -> Path:
     parts = PurePosixPath(member.name).parts
-    if len(parts) < 4:
+    if len(parts) < 4 or parts[1] != source["id"]:
         raise BackupFailure("archive file member has an invalid mapping")
     relative = PurePosixPath(*parts[3:])
-    root = Path(source["restore_destination"])
     restore_root = Path(config["restore_root"])
-    try:
-        root.relative_to(restore_root)
-    except ValueError as exc:
-        raise BackupFailure("restore destination escapes the configured restore root") from exc
+    root = restore_root.joinpath(*PurePosixPath(source["restore_destination"]).parts)
     if source["type"] == "file":
         if len(parts) != 4 or parts[2] != "0":
             raise BackupFailure("archive file source has an invalid mapping")
@@ -475,7 +671,9 @@ def _restore_file(archive: tarfile.TarFile, member: tarfile.TarInfo, target: Pat
     extracted = archive.extractfile(member)
     if extracted is None:
         raise BackupFailure("unable to read archive member")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    # Do not truncate until the opened descriptor itself has passed the
+    # regular-file and single-link checks; this closes the validation/open race.
+    flags = os.O_WRONLY | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(target, flags, 0o600)
@@ -483,11 +681,30 @@ def _restore_file(archive: tarfile.TarFile, member: tarfile.TarInfo, target: Pat
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise BackupFailure("restore destination is not a safe regular file")
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
         with os.fdopen(descriptor, "wb", closefd=False) as output:
             shutil.copyfileobj(extracted, output)
     finally:
         os.close(descriptor)
     _apply_metadata(target, member)
+
+
+def _wait_for_postgres(config: dict[str, Any], source: dict[str, Any]) -> None:
+    last_error: BackupFailure | None = None
+    for attempt in range(30):
+        try:
+            run([
+                "docker", "compose", "-f", config["compose_file"], "exec", "-T",
+                source["service"], "pg_isready", "-U", source["user"],
+                "-d", source["database"],
+            ])
+            return
+        except BackupFailure as exc:
+            last_error = exc
+            if attempt < 29:
+                time.sleep(2)
+    raise BackupFailure("PostgreSQL did not become ready for restore") from last_error
 
 
 def restore(config: dict[str, Any], identifier: str) -> dict[str, Any]:
@@ -501,13 +718,18 @@ def restore(config: dict[str, Any], identifier: str) -> dict[str, Any]:
         archive_path = workspace / f"{identifier}.tar.gz"
         for item in (encrypted, sidecar, manifest_path):
             _rclone(config, "copyto", _remote_path(config, item.name), str(item))
-        expected = sidecar.read_text(encoding="ascii").split()[0]
+        try:
+            expected = _parse_sidecar(
+                sidecar.read_text(encoding="ascii"), encrypted.name
+            )
+        except (OSError, UnicodeError) as exc:
+            raise BackupFailure("backup checksum sidecar is unreadable") from exc
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise BackupFailure("backup manifest verification failed") from exc
         if (
-            re.fullmatch(r"[0-9a-f]{64}", expected) is None
+            expected is None
             or manifest.get("backup_id") != identifier
             or manifest.get("artifact") != encrypted.name
             or manifest.get("sha256") != expected
@@ -518,18 +740,20 @@ def restore(config: dict[str, Any], identifier: str) -> dict[str, Any]:
         run(["age", "-d", "-i", config["age_identity"], "-o", str(archive_path), str(encrypted)])
         with tarfile.open(archive_path, "r:gz") as archive:
             members = safe_members(archive)
+            source_map = _load_source_map(archive, members)
+            _validate_mapped_members(members, source_map)
+            restored_sources: set[str] = set()
             directories: list[tuple[Path, tarfile.TarInfo]] = []
             for member in members:
                 path = PurePosixPath(member.name)
                 if path.parts[0] != "files":
                     continue
-                try:
-                    source_index = int(path.parts[1])
-                    source = config["include"][source_index]
-                except (IndexError, ValueError) as exc:
-                    raise BackupFailure("archive file source index is invalid") from exc
+                source = source_map.get(path.parts[1]) if len(path.parts) > 1 else None
+                if source is None:
+                    raise BackupFailure("archive file source identifier is unknown")
                 if source["type"] == "postgres":
                     raise BackupFailure("archive file source mapping is invalid")
+                restored_sources.add(source["id"])
                 target = _member_destination(config, source, member)
                 if member.isdir():
                     target.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -540,17 +764,30 @@ def restore(config: dict[str, Any], identifier: str) -> dict[str, Any]:
                 directories, key=lambda item: len(item[0].parts), reverse=True
             ):
                 _apply_metadata(target, member)
-            postgres = [item for item in config["include"] if item["type"] == "postgres"]
-            dumps = [item for item in members if PurePosixPath(item.name).parts[0] == "database"]
-            if len(postgres) != len(dumps):
-                raise BackupFailure("backup database manifest does not match restore config")
-            for source_config, member in zip(postgres, dumps, strict=True):
+            dumps: dict[str, tarfile.TarInfo] = {}
+            for member in members:
+                path = PurePosixPath(member.name)
+                if path.parts[0] != "database":
+                    continue
+                if len(path.parts) != 2 or not path.name.endswith(".sql"):
+                    raise BackupFailure("archive database member has an invalid mapping")
+                source_id = path.name[:-4]
+                source = source_map.get(source_id)
+                if source is None or source["type"] != "postgres" or source_id in dumps:
+                    raise BackupFailure("archive database source mapping is invalid")
+                dumps[source_id] = member
+            expected_sources = set(source_map)
+            if restored_sources | set(dumps) != expected_sources:
+                raise BackupFailure("archive contents do not match authenticated source mapping")
+            for source_id, member in dumps.items():
+                source_config = source_map[source_id]
                 dump = workspace / Path(member.name).name
                 extracted = archive.extractfile(member)
                 if extracted is None:
                     raise BackupFailure("unable to read database dump")
                 with dump.open("wb") as output:
                     shutil.copyfileobj(extracted, output)
+                _wait_for_postgres(config, source_config)
                 run([
                     "docker", "compose", "-f", config["compose_file"], "exec", "-T",
                     source_config["service"], "psql", "-v", "ON_ERROR_STOP=1", "-U",

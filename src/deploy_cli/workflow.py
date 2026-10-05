@@ -564,15 +564,6 @@ def _backup_variables(source: EnvironmentConfig, target: EnvironmentConfig) -> d
     backup = source.backup
     if backup is None:
         raise RunnerError("Production backup is not configured", 8)
-    include: list[dict[str, object]] = []
-    for item in backup.include:
-        document = item.model_dump(mode="json")
-        destination = document.get("restore_destination")
-        if isinstance(destination, str):
-            document["restore_destination"] = (
-                f"{target.application.remote_dir}/{destination}"
-            )
-        include.append(document)
     return {
         "app_environment": target.environment,
         "backup_schedule": backup.schedule,
@@ -581,7 +572,9 @@ def _backup_variables(source: EnvironmentConfig, target: EnvironmentConfig) -> d
             "age_identity": "/run/ansible-deploy-age-identity",
             "age_recipient": backup.age_recipient,
             "compose_file": f"{target.application.remote_dir}/current/compose.yml",
-            "include": include,
+            # Destinations remain relative here. Each backup records an immutable,
+            # encrypted source map and resolves it below the selected Restore root.
+            "include": [item.model_dump(mode="json") for item in backup.include],
             "rclone_config": "/etc/ansible-deploy/backup/rclone.conf",
             "remote": backup.remote,
             "restore_root": target.application.remote_dir,
@@ -621,7 +614,7 @@ def backup_operation(
         config.server.ssh_key,
         backup_credentials_file=(
             config.backup.credentials_file
-            if config.backup is not None and action == "setup"
+            if config.backup is not None
             else None
         ),
         exit_code=8,

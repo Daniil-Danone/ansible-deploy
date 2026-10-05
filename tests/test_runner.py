@@ -9,9 +9,7 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
-import yaml
 
-from deploy_cli.config import load_configuration
 from deploy_cli.redaction import Redactor
 from deploy_cli.runner import (
     FAILURE_OUTPUT_LINE_BYTES,
@@ -344,69 +342,6 @@ def test_runtime_container_names_are_unique(
     names = [command[command.index("--name") + 1] for command in commands]
     assert names[0] != names[1]
     assert all(name.startswith("ansible-deploy-prod-") for name in names)
-
-
-def test_relative_yaml_key_paths_are_absolute_for_nonbootstrap_runner_commands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = Path(__file__).parents[1]
-    (tmp_path / "config").mkdir()
-    environment_dir = tmp_path / "environments/stage"
-    environment_dir.mkdir(parents=True)
-    (tmp_path / "config/global.yml").write_text(
-        (source / "config/global.yml").read_text(encoding="utf-8"), encoding="utf-8"
-    )
-    raw = yaml.safe_load((source / "environments/stage/config.yml").read_text(encoding="utf-8"))
-    raw["server"]["ssh_key"] = "relative/deploy-key"
-    raw["server"]["public_key"] = "relative/deploy-key.pub"
-    (environment_dir / "config.yml").write_text(yaml.safe_dump(raw), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    _, config = load_configuration(tmp_path, "stage")
-    expected_key = tmp_path / "relative/deploy-key"
-    assert config.server.ssh_key == expected_key
-    assert config.server.public_key == expected_key.with_suffix(".pub")
-    assert config.server.ssh_key.is_absolute()
-
-    inventory = tmp_path / "inventory.yml"
-    inventory.write_text("all: {}\n", encoding="utf-8")
-    commands: list[list[str]] = []
-
-    class Process:
-        stdout = StringIO()
-        stdin = None
-
-        def poll(self):
-            return 0
-
-        def wait(self, timeout=None):
-            return 0
-
-    def popen(args, **kwargs):
-        commands.append(args)
-        return Process()
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    runner = AnsibleRunner(tmp_path, Redactor([]))
-    runner.playbook("site.yml", inventory, {}, config.server.ssh_key, check=True)
-    runner.playbook("update.yml", inventory, {}, config.server.ssh_key)
-    runner.playbook("rollback.yml", inventory, {}, config.server.ssh_key)
-
-    expected_mount = f"{expected_key}:/run/secrets-source/ssh_key:ro"
-    assert ["--check" in command for command in commands] == [True, False, False]
-    assert all(expected_mount in command for command in commands)
-    assert all(
-        f"{expected_key}:/run/secrets/ssh_key:ro" not in command for command in commands
-    )
-    assert all(
-        "/run/ansible-deploy-secrets:rw,noexec,nosuid,nodev,size=1m,mode=0700"
-        in command
-        for command in commands
-    )
-    assert all(
-        command[command.index("--private-key") + 1]
-        == "/run/ansible-deploy-secrets/ssh_key"
-        for command in commands
-    )
 
 
 def test_runtime_copies_permissive_bind_mount_to_private_container_file(

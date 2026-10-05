@@ -6,6 +6,32 @@ Production backup описывается секцией `backup` в
 Сгенерированный scaffold содержит полную, но выключенную (`enabled: false`)
 секцию. Перед включением замените remote/recipient и настройте источники:
 
+Сначала установите локальные `age` и `rclone`, получите root через `deploy secrets
+path` и создайте каталог `backup` с owner-only permissions. Затем сгенерируйте новую
+identity и выведите соответствующий public recipient:
+
+```bash
+age-keygen -o /external/root/backup/age.key
+age-keygen -y /external/root/backup/age.key
+rclone --config /external/root/backup/rclone.conf config
+```
+
+В PowerShell используйте путь, который вернул `deploy secrets path`, например:
+
+```powershell
+$secretRoot = deploy secrets path
+New-Item -ItemType Directory -Force "$secretRoot\backup"
+age-keygen -o "$secretRoot\backup\age.key"
+age-keygen -y "$secretRoot\backup\age.key"
+rclone --config "$secretRoot\backup\rclone.conf" config
+```
+
+Скопируйте только напечатанный `age1...` recipient в commit-safe config. Private
+`AGE-SECRET-KEY-...` остаётся исключительно в `age.key`. В интерактивном rclone создайте
+remote с тем же именем, которое стоит до двоеточия в `backup.remote` (`gdrive` в примере
+ниже). После создания ограничьте доступ к обоим файлам текущим пользователем; не
+печатайте и не коммитьте их содержимое.
+
 ```yaml
 backup:
   enabled: true

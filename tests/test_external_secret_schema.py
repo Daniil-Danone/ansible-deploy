@@ -92,6 +92,41 @@ def _link_directory(link: Path, target: Path) -> None:
             pytest.skip("Windows junction creation is unavailable")
 
 
+def test_external_parent_creation_tolerates_concurrent_creator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    trusted_base = tmp_path / "trusted"
+    _secure_directory(trusted_base)
+    root = trusted_base / "secrets"
+    target = root / "environment" / "app.env"
+    original_mkdir = Path.mkdir
+    raced = False
+
+    def racing_mkdir(path: Path, *args, **kwargs) -> None:
+        nonlocal raced
+        if path == root and not raced:
+            raced = True
+            original_mkdir(path, *args, **kwargs)
+            secure_secret_permissions(path)
+            raise FileExistsError(path)
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    secret_store.ensure_external_parent_for_write(
+        project,
+        root,
+        target,
+        trusted_base=trusted_base,
+        validate_trusted_base=True,
+    )
+
+    assert raced
+    assert target.parent.is_dir()
+
+
 def test_t5_schema_v2_resolves_every_sensitive_name_inside_external_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -274,7 +309,7 @@ def test_every_schema_v2_sensitive_field_uses_portable_name_validator(
         load_configuration(project, environment)
 
 
-@pytest.mark.parametrize("schema_version", [None, 3])
+@pytest.mark.parametrize("schema_version", [None, 1, 3])
 def test_schema_version_missing_or_unknown_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -289,7 +324,7 @@ def test_schema_version_missing_or_unknown_fails_closed(
         raw["schema_version"] = schema_version
     path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ConfigurationError, match="Invalid configuration"):
+    with pytest.raises(ConfigurationError, match="only schema_version: 2 is supported"):
         load_configuration(project, "stage")
 
 

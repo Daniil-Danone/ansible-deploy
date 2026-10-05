@@ -26,8 +26,9 @@ deploy backup list prod
 deploy backup restore prod --target restore --backup ID [--yes]
 ```
 
-`project sync --check` ничего не пишет и возвращает ненулевой код при pending update
-или conflict. Обычный sync никогда не перезаписывает изменённый config/Compose.
+`project sync --check` не меняет файлы, но печатает план `[CREATE]`/`[UPDATE]`, conflict
+или `[OK]`; он возвращает ненулевой код при pending update или conflict. Обычный sync
+никогда не перезаписывает изменённый config/Compose.
 
 `--dry-run` применяет Ansible check mode там, где он безопасен, и не выполняет
 bootstrap с password. Production-changing commands требуют интерактивного `prod`; в

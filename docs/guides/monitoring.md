@@ -7,6 +7,19 @@
 3. Там же создайте отдельные `environments/{stage,prod}/collector.password` и
    ограничьте доступ текущим пользователем (`chmod 600` либо Windows ACL).
 
+На машине без локального OpenSSL hash можно получить через одноразовый Docker
+container. Команда не содержит пароль в argv или shell history; введите его только в
+интерактивном prompt и перенесите напечатанную строку `$6$...` в
+`LOKI_PUSH_PASSWORD_HASH`:
+
+```text
+docker run --rm -it alpine:3.20 sh -lc 'apk add --no-cache openssl >/dev/null && openssl passwd -6'
+```
+
+Не используйте `echo PASSWORD | ...`: plaintext попадёт в process/pipeline history или
+диагностический log. Hash не заменяет отдельный `LOKI_PUSH_PASSWORD`, который collectors
+используют для Basic Auth.
+
 ```text
 deploy monitoring deploy --ask-bootstrap-password
 deploy collectors deploy all --yes

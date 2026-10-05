@@ -6,7 +6,7 @@ from deploy_cli.config import ConfigurationError, load_configuration, validate_c
 
 
 def _config(tmp_path: Path, compose: str):
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     _, config = load_configuration(repo, "stage")
     compose_path = tmp_path / "compose.yml"
     compose_path.write_text(compose, encoding="utf-8")
@@ -15,7 +15,7 @@ def _config(tmp_path: Path, compose: str):
 
 
 def _prod_config(tmp_path: Path, compose: str):
-    repo = Path(__file__).parents[1]
+    repo = Path(__file__).parents[1] / "examples/demo-app"
     _, config = load_configuration(repo, "prod")
     compose_path = tmp_path / "compose.yml"
     compose_path.write_text(compose, encoding="utf-8")

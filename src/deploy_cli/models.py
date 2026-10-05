@@ -361,7 +361,7 @@ class EnvironmentConfig(StrictModel):
     _external_trusted_base: Path | None = PrivateAttr(default=None)
     _validate_external_trusted_base: bool = PrivateAttr(default=True)
 
-    schema_version: Literal[1, 2]
+    schema_version: Literal[2]
     environment: Literal["stage", "prod", "restore"]
     source_environment: Literal["prod"] | None = None
     server: ServerConfig
@@ -417,8 +417,6 @@ class EnvironmentConfig(StrictModel):
             raise ValueError("restore environment requires source_environment: prod")
         if self.environment != "restore" and self.source_environment is not None:
             raise ValueError("source_environment is only valid for restore environment")
-        if self.backup is not None and self.schema_version != 2:
-            raise ValueError("backup requires schema v2 external secret storage")
         if not self.health_path.startswith("/"):
             raise ValueError("health_path must start with /")
         if self.collector is not None and _paths_overlap(
@@ -468,7 +466,7 @@ class MonitoringConfig(StrictModel):
     _external_trusted_base: Path | None = PrivateAttr(default=None)
     _validate_external_trusted_base: bool = PrivateAttr(default=True)
 
-    schema_version: Literal[1, 2]
+    schema_version: Literal[2]
     environment: Literal["monitoring"]
     server: ServerConfig
     domain: str

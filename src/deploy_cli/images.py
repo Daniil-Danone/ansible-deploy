@@ -549,61 +549,15 @@ def _portable_registry_auth(username: str, token: str, registry_host: str) -> by
     return (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def _is_reparse_path(path: Path) -> bool:
-    try:
-        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
-    except OSError:
-        return False
-    return bool(attributes & 0x400)
-
-
 def _assert_registry_auth_target(
     project: Path, deployment: EnvironmentConfig, path: Path
 ) -> None:
-    if deployment.schema_version == 2:
-        if deployment.external_secret_context is None:
-            raise ConfigurationError(
-                f"External registry authentication store is unavailable for "
-                f"{deployment.environment}"
-            )
-        return
-    current = path
-    while True:
-        if current.is_symlink() or _is_reparse_path(current):
-            raise ConfigurationError(
-                "Registry authentication path cannot use symbolic links or junctions"
-            )
-        if current == project or current.parent == current:
-            break
-        current = current.parent
-    if path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
-        raise ConfigurationError("Registry authentication must be one regular file")
-    repository = subprocess.run(  # noqa: S603 - fixed Git command
-        ["git", "rev-parse", "--is-inside-work-tree"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if repository.returncode != 0:
-        return
-    relative = path.relative_to(project)
-    tracked = subprocess.run(  # noqa: S603 - fixed Git command
-        ["git", "ls-files", "--error-unmatch", "--", str(relative)],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=False,
-    )
-    if tracked.returncode == 0:
-        raise ConfigurationError("Registry authentication file must not be tracked by Git")
-    ignored = subprocess.run(  # noqa: S603 - fixed Git command
-        ["git", "check-ignore", "--quiet", "--", str(relative)],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=False,
-    )
-    if ignored.returncode != 0:
-        raise ConfigurationError("Registry authentication path must be ignored by Git")
+    del project, path
+    if deployment.external_secret_context is None:
+        raise ConfigurationError(
+            f"External registry authentication store is unavailable for "
+            f"{deployment.environment}"
+        )
 
 
 def _create_registry_auth(path: Path, content: bytes) -> tuple[int, int, int, int]:
@@ -709,7 +663,7 @@ def publish_images(
     registry_host = "ghcr.io" if registry == "ghcr" else "docker.io"
     _, deployment = load_configuration(project, environment)
     registry_auth_path = deployment.application.registry_auth_file
-    if registry_auth_path is not None and deployment.schema_version == 2:
+    if registry_auth_path is not None:
         context = deployment.external_secret_context
         if context is None:
             raise ConfigurationError(

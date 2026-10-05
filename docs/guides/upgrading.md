@@ -91,6 +91,37 @@ credentials. Перед Production проверьте `deploy project sync --che
 Production разрешайте только после `deploy stage --dry-run`, обычного `deploy stage` и
 успешного `deploy status stage` для того же Git SHA, который будет выпущен в Production.
 
+## Takeover of a server deployed by an older CLI
+
+Сервер, который уже обслуживается более старой версией CLI, новый CLI принимает «на
+месте» — без переустановки и без переноса данных. Данные живут в Docker named volumes
+`<compose project>_<ключ>` (для Production — `myapp_prod_<ключ>`), поэтому главное —
+ничего не переименовать.
+
+1. **Оставьте прежними** `environment`, `application.remote_dir`, `domain` и
+   `health_path`, а также ключи top-level `volumes:` в Compose. Для Stage project name —
+   последний сегмент `remote_dir`, так что его смена тоже означает новые пустые volumes.
+2. **Используйте старую пару deploy SSH-ключей**: положите её во внешний secret store
+   (`deploy secrets path`) как `keys/<env>_ed25519` и `keys/<env>_ed25519.pub`, например
+   `keys/prod_ed25519{,.pub}`. Иначе CLI не получит managed access и предложит bootstrap.
+3. **Скопируйте секреты байт-в-байт** (application `env_file`, extra env files, registry
+   auth): пароли БД и прочие credentials уже «запечены» в данные volumes, и новые значения
+   не подойдут к существующей БД. Не пересоздавайте их генератором.
+4. **Сначала dry-run**:
+
+   ```bash
+   deploy prod --dry-run
+   ```
+
+   Он проверяет доступ, identity сервера и
+   [непрерывность named volumes](../concepts/server-state.md#непрерывность-named-volumes):
+   если хотя бы один volume нового Compose не существует на сервере или volume активного
+   release исчез из Compose, команда остановится и перечислит имена. Исправьте config,
+   а не обходите проверку флагом `--allow-volume-change` — он только для действительно
+   новых или намеренно удаляемых volumes.
+5. Только после чистого dry-run выполните обычный `deploy prod --yes` и
+   `deploy status prod`.
+
 ## Откат
 
 До commit используйте обычный review/diff и удалите только явно созданные кандидаты.

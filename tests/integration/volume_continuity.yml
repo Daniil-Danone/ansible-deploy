@@ -1,0 +1,101 @@
+---
+- name: Exercise named volume continuity between releases
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment:
+    PATH: "/tmp/volume-continuity/bin:{{ lookup('ansible.builtin.env', 'PATH') }}"
+  vars:
+    continuity_fixture_root: /tmp/volume-continuity
+    current_compose:
+      services:
+        app:
+          image: example/app:1
+          volumes: ["postgres-data:/var/lib/postgresql/data", "uploads:/srv/uploads"]
+      volumes:
+        postgres-data:
+        uploads: {}
+    continuity_cases:
+      - name: unchanged volumes
+        project: myapp_prod
+        target: {services: {app: {image: example/app:2}}, volumes: {postgres-data: null, uploads: null}}
+        expect_failure: false
+      - name: renamed volume key
+        project: myapp_prod
+        target: {services: {app: {image: example/app:2}}, volumes: {pg-data: null, uploads: null}}
+        expect_failure: true
+        expect_in_message: [myapp_prod_postgres-data, myapp_prod_pg-data, EMPTY, --allow-volume-change]
+      - name: changed Compose project name
+        project: myapp
+        target: {services: {app: {image: example/app:2}}, volumes: {postgres-data: null, uploads: null}}
+        expect_failure: true
+        expect_in_message: [myapp_postgres-data, myapp_uploads]
+      - name: unacknowledged new volume
+        project: myapp_prod
+        target: {services: {app: {image: example/app:2}}, volumes: {postgres-data: null, uploads: null, cache: null}}
+        expect_failure: true
+        expect_in_message: [myapp_prod_cache]
+      - name: acknowledged new volume
+        project: myapp_prod
+        target: {services: {app: {image: example/app:2}}, volumes: {postgres-data: null, uploads: null, cache: null}}
+        allowed: [cache]
+        expect_failure: false
+      - name: unacknowledged removed volume
+        project: myapp_prod
+        target: {services: {app: {image: example/app:2}}, volumes: {postgres-data: null}}
+        expect_failure: true
+        expect_in_message: [myapp_prod_uploads, no longer declares]
+      - name: acknowledged removed volume
+        project: myapp_prod
+        target: {services: {app: {image: example/app:2}}, volumes: {postgres-data: null}}
+        allowed: [uploads]
+        expect_failure: false
+      - name: rollback ignores volumes only the active release added
+        project: myapp_prod
+        target: {services: {app: {image: example/app:1}}, volumes: {postgres-data: null}}
+        check_removed: false
+        expect_failure: false
+      - name: rollback still rejects a missing volume
+        project: myapp_prod
+        target: {services: {app: {image: example/app:1}}, volumes: {postgres-data: null, legacy: null}}
+        check_removed: false
+        expect_failure: true
+        expect_in_message: [myapp_prod_legacy]
+      - name: explicitly named volume
+        project: myapp_prod
+        target: {services: {app: {image: example/app:2}}, volumes: {postgres-data: {name: other}, uploads: null}}
+        expect_failure: true
+        expect_in_message: [plain top-level named volumes]
+      - name: acknowledged removal of every volume
+        project: myapp_prod
+        target: {services: {app: {image: example/app:2}}}
+        allowed: [postgres-data, uploads]
+        expect_failure: false
+  tasks:
+    - name: Create fake Docker CLI directory
+      ansible.builtin.file:
+        path: "{{ continuity_fixture_root }}/bin"
+        state: directory
+        mode: "0755"
+
+    - name: Install fake Docker CLI listing existing volumes
+      ansible.builtin.copy:
+        dest: "{{ continuity_fixture_root }}/bin/docker"
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          [ "$*" = "volume ls --quiet" ] || { echo "unexpected docker call: $*" >&2; exit 64; }
+          printf '%s\n' myapp_prod_postgres-data myapp_prod_uploads other_postgres-data
+
+    - name: Write active release Compose definition
+      ansible.builtin.copy:
+        dest: "{{ continuity_fixture_root }}/current-compose.yml"
+        content: "{{ current_compose | to_nice_yaml }}"
+        mode: "0600"
+
+    - name: Exercise every volume continuity case
+      ansible.builtin.include_tasks: tasks/volume_continuity_case.yml
+      loop: "{{ continuity_cases }}"
+      loop_control:
+        loop_var: volume_case
+        label: "{{ volume_case.name }}"

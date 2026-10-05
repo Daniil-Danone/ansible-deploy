@@ -123,6 +123,20 @@
   check_mode: false
   register: release_link_targets
 
+- name: Keep named volume data continuous with the active release
+  ansible.builtin.include_role:
+    name: volume_continuity_guard
+  vars:
+    volume_continuity_guard_project: "{{ app_compose_project }}"
+    volume_continuity_guard_current_compose: "{{ app_dir }}/current/compose.yml"
+    volume_continuity_guard_target_compose: >-
+      {{ lookup('ansible.builtin.file', app_compose_file) | from_yaml }}
+    volume_continuity_guard_allowed_changes: "{{ app_allowed_volume_changes | default([]) }}"
+    volume_continuity_guard_hint: >-
+      If the change is intentional, rerun the deploy with
+      --allow-volume-change NAME for each listed volume key.
+  when: application_state.results[0].stat.islnk | default(false)
+
 - name: Persist deployment transaction before candidate activation
   ansible.builtin.copy:
     dest: "{{ app_dir }}/transaction.json"

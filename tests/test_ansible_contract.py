@@ -179,6 +179,36 @@ def test_nginx_changes_queue_validation_then_reload_in_handler_order() -> None:
     assert all(task["notify"] == ["Validate nginx", "Reload nginx"] for task in nginx_changes)
 
 
+def test_application_proxy_renders_configured_body_size_and_timeouts() -> None:
+    tasks = _yaml("ansible/roles/reverse_proxy/tasks/main.yml")
+    expected = (
+        "client_max_body_size {{ app_client_max_body_size }};\n"
+        "        proxy_read_timeout {{ app_proxy_read_timeout }}s;\n"
+        "        proxy_send_timeout {{ app_proxy_read_timeout }}s;\n"
+        "        proxy_pass http://127.0.0.1:{{ app_upstream_port }};"
+    )
+    for name in ("Install HTTP bootstrap virtual host", "Install HTTPS virtual host"):
+        task = next(task for task in tasks if task.get("name") == name)
+        content = task["ansible.builtin.copy"]["content"]  # type: ignore[index]
+
+        assert content.count("proxy_pass ") == 1, name
+        assert expected in content, name
+
+
+def test_reverse_proxy_limits_are_not_part_of_immutable_identity() -> None:
+    for path in (
+        "ansible/roles/environment_guard/tasks/main.yml",
+        "ansible/roles/environment_identity/tasks/main.yml",
+        "ansible/roles/application/tasks/main.yml",
+        "ansible/roles/legacy_snapshot/tasks/main.yml",
+        "ansible/roles/legacy_adoption/tasks/main.yml",
+    ):
+        text = _text(path)
+
+        assert "app_client_max_body_size" not in text, path
+        assert "app_proxy_read_timeout" not in text, path
+
+
 def test_ssh_check_mode_does_not_depend_on_staged_files() -> None:
     tasks = _yaml("ansible/roles/hardening/tasks/main.yml")
     staged = [task for task in tasks if "staged" in str(task.get("name", "")).lower()]

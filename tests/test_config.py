@@ -489,3 +489,92 @@ def test_compose_accepts_non_secret_inline_environment(tmp_path: Path) -> None:
     config.application.compose = compose
 
     validate_compose(config)
+
+
+def test_reverse_proxy_defaults_reproduce_nginx_builtins() -> None:
+    raw = yaml.safe_load((FIXTURE / "environments/stage/config.yml").read_text())
+    assert "reverse_proxy" not in raw
+
+    config = EnvironmentConfig.model_validate(raw)
+
+    assert config.reverse_proxy.client_max_body_size == "1m"
+    assert config.reverse_proxy.proxy_read_timeout == 60
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        ("12m", "12m"),
+        ("12M", "12m"),
+        ("512k", "512k"),
+        ("1g", "1g"),
+        ("1048576", "1048576"),
+        (1048576, "1048576"),
+    ],
+)
+@pytest.mark.parametrize("timeout", [1, 120, 3600])
+def test_reverse_proxy_accepts_nginx_sizes_and_bounded_timeouts(
+    size: object, expected: str, timeout: int
+) -> None:
+    raw = yaml.safe_load((FIXTURE / "environments/stage/config.yml").read_text())
+    raw["reverse_proxy"] = {"client_max_body_size": size, "proxy_read_timeout": timeout}
+
+    config = EnvironmentConfig.model_validate(raw)
+
+    assert config.reverse_proxy.client_max_body_size == expected
+    assert config.reverse_proxy.proxy_read_timeout == timeout
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        "0",
+        0,
+        "0m",
+        "012m",
+        "12mb",
+        "12 m",
+        " 12m",
+        "1.5m",
+        "-1m",
+        "12t",
+        "",
+        "off",
+        "m",
+        True,
+        "12m;",
+        "1234567890m",
+        12.5,
+    ],
+)
+def test_reverse_proxy_rejects_invalid_body_size(size: object) -> None:
+    raw = yaml.safe_load((FIXTURE / "environments/stage/config.yml").read_text())
+    raw["reverse_proxy"] = {"client_max_body_size": size}
+
+    with pytest.raises(ValidationError, match="positive Nginx size"):
+        EnvironmentConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 3601, "120", 120.0, True, "120s"])
+def test_reverse_proxy_rejects_invalid_read_timeout(timeout: object) -> None:
+    raw = yaml.safe_load((FIXTURE / "environments/stage/config.yml").read_text())
+    raw["reverse_proxy"] = {"proxy_read_timeout": timeout}
+
+    with pytest.raises(ValidationError, match="proxy_read_timeout"):
+        EnvironmentConfig.model_validate(raw)
+
+
+def test_reverse_proxy_rejects_unknown_settings() -> None:
+    raw = yaml.safe_load((FIXTURE / "environments/stage/config.yml").read_text())
+    raw["reverse_proxy"] = {"proxy_send_timeout": 120}
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        EnvironmentConfig.model_validate(raw)
+
+
+def test_monitoring_does_not_accept_application_reverse_proxy_settings() -> None:
+    raw = yaml.safe_load((FIXTURE / "environments/monitoring/config.yml").read_text())
+    raw["reverse_proxy"] = {"client_max_body_size": "12m"}
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        MonitoringConfig.model_validate(raw)

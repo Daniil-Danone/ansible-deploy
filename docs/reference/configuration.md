@@ -68,6 +68,31 @@ Production обязан иметь отдельные paths/remote_dir и digest
 Optional `collector` содержит HTTPS Loki push URL, username и внешний
 `password_file`; его remote directory не пересекается с application directory.
 
+### Reverse proxy limits
+
+Optional `reverse_proxy` в Stage/Production/Restore настраивает host Nginx, который
+проксирует `domain` на `127.0.0.1:<upstream port>`:
+
+```yaml
+reverse_proxy:
+  client_max_body_size: 12m   # default 1m
+  proxy_read_timeout: 120     # seconds, default 60
+```
+
+- `client_max_body_size` — Nginx size: целое число без ведущего нуля и опциональный
+  суффикс `k`/`m`/`g` (регистр не важен, `12M` нормализуется в `12m`). `0`/`off` не
+  принимаются: снять лимит целиком нельзя.
+- `proxy_read_timeout` — целое число секунд `1..3600`. То же значение применяется к
+  `proxy_send_timeout`, чтобы медленная отправка большого upload к приложению не
+  обрывалась раньше ожидания ответа; отдельного ключа нет.
+- Без секции поведение совпадает с прежним (Nginx defaults `1m` и `60s`). Неизвестные
+  ключи отклоняются.
+
+Лимиты применяются в HTTP bootstrap и HTTPS virtual host приложения при deploy, `deploy server update`
+и `deploy backup restore`. Они не входят в immutable identity окружения и release checksum, поэтому
+их можно менять между релизами, в том числе при повторном deploy той же версии.
+Monitoring Nginx эти настройки не принимает.
+
 ## Monitoring
 
 Monitoring schema v2 использует общий `server`, `domain`, `acme_email` и секцию:

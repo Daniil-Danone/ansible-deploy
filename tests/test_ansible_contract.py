@@ -351,3 +351,67 @@ def test_restore_removes_undeclared_extra_env_files_before_delivery() -> None:
     assert names.index("Deliver Restore environment securely") < names.index(
         "Remove undeclared Restore extra environments"
     ) < names.index("Deliver Restore extra environments securely")
+
+
+def test_volume_continuity_guard_runs_before_any_release_transaction() -> None:
+    tasks = _yaml("ansible/roles/application/tasks/main.yml")
+    names = [str(task.get("name")) for task in tasks]
+    guard_name = "Keep named volume data continuous with the active release"
+    guard = tasks[names.index(guard_name)]
+
+    assert guard["ansible.builtin.include_role"] == {"name": "volume_continuity_guard"}
+    # First deploy (no committed current release) is not affected.
+    assert guard["when"] == "application_state.results[0].stat.islnk | default(false)"
+    guard_vars = guard["vars"]
+    assert isinstance(guard_vars, dict)
+    assert guard_vars["volume_continuity_guard_project"] == "{{ app_compose_project }}"
+    assert (
+        guard_vars["volume_continuity_guard_current_compose"]
+        == "{{ app_dir }}/current/compose.yml"
+    )
+    # The controller-side Compose file keeps the guard effective under --dry-run.
+    assert "lookup('ansible.builtin.file', app_compose_file)" in str(
+        guard_vars["volume_continuity_guard_target_compose"]
+    )
+    assert "app_allowed_volume_changes" in str(
+        guard_vars["volume_continuity_guard_allowed_changes"]
+    )
+    assert "--allow-volume-change" in str(guard_vars["volume_continuity_guard_hint"])
+    assert names.index("Read existing release link targets") < names.index(guard_name)
+    assert names.index(guard_name) < names.index(
+        "Persist deployment transaction before candidate activation"
+    )
+    assert names.index(guard_name) < names.index(
+        "Reconcile candidate application services with safe failure diagnostics"
+    )
+
+
+def test_volume_continuity_guard_reads_docker_without_mutation() -> None:
+    path = "ansible/roles/volume_continuity_guard/tasks/main.yml"
+    tasks = _yaml(path)
+    commands = [task for task in tasks if "ansible.builtin.command" in task]
+
+    assert len(commands) == 1
+    assert commands[0]["ansible.builtin.command"] == {  # type: ignore[comparison-overlap]
+        "argv": ["docker", "volume", "ls", "--quiet"]
+    }
+    assert commands[0]["changed_when"] is False
+    assert commands[0]["check_mode"] is False
+    slurp = next(task for task in tasks if "ansible.builtin.slurp" in task)
+    assert slurp["no_log"] is True
+    # Effective Docker names are <project>_<key>: CLI policy forbids name:/external:.
+    assert "volume_continuity_guard_project ~ '_'" in _text(path)
+
+
+def test_rollback_requires_target_volumes_before_its_transaction() -> None:
+    play = _yaml("ansible/playbooks/rollback.yml")[0]
+    tasks = play["tasks"]
+    assert isinstance(tasks, list)
+    names = [str(task.get("name")) for task in tasks]
+    guard = tasks[names.index("Require rollback target volumes to still exist")]
+
+    assert guard["ansible.builtin.include_role"] == {"name": "volume_continuity_guard"}
+    assert guard["vars"]["volume_continuity_guard_check_removed"] is False
+    assert names.index("Require rollback target volumes to still exist") < names.index(
+        "Persist rollback transaction before candidate activation"
+    )

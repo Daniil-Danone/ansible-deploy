@@ -333,3 +333,31 @@ def test_environment_version_option_is_not_shadowed_by_cli_version() -> None:
 
     assert args.command == "stage"
     assert args.version == "abc123"
+
+
+def test_allow_volume_change_is_repeatable_and_validated(capsys) -> None:
+    args = cli._parser().parse_args(
+        ["prod", "--allow-volume-change", "cache", "--allow-volume-change", "media_v2"]
+    )
+    assert args.allow_volume_change == ["cache", "media_v2"]
+    assert cli._parser().parse_args(["stage"]).allow_volume_change == []
+
+    with pytest.raises(SystemExit):
+        cli._parser().parse_args(["stage", "--allow-volume-change", "../data"])
+    assert "invalid Compose volume name" in capsys.readouterr().err
+
+
+def test_allow_volume_change_is_passed_to_deploy(monkeypatch) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        cli, "_load_and_validate", lambda repo, env, command, **kwargs: _loaded(env)
+    )
+    monkeypatch.setattr(cli, "dns_preflight", lambda config: None)
+    monkeypatch.setattr(
+        cli,
+        "deploy",
+        lambda *args, **kwargs: calls.append(kwargs["allowed_volume_changes"]),
+    )
+
+    assert run(["prod", "--yes", "--version", "abcdef0", "--allow-volume-change", "cache"]) == 0
+    assert calls == [["cache"]]

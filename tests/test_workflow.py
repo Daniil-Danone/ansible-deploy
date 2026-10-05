@@ -63,6 +63,38 @@ def test_repeat_deploy_uses_only_managed_access(tmp_path: Path) -> None:
     assert runner.playbook.call_args_list[0].args[1].name == "managed.yml"
     assert runner.playbook.call_args_list[4].kwargs["exit_code"] == 7
     assert runner.playbook.call_args_list[3].args[2]["app_compose_project"] == "demo-stage"
+    assert runner.playbook.call_args_list[3].args[2]["app_allowed_volume_changes"] == []
+
+
+def test_deploy_passes_acknowledged_volume_changes_without_changing_checksum(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).parents[1] / "examples/demo-app"
+    global_config, config = load_configuration(repo, "stage")
+    key = tmp_path / "id_ed25519"
+    public_key = tmp_path / "id_ed25519.pub"
+    env = tmp_path / "stage.env"
+    key.write_text("private-placeholder", encoding="utf-8")
+    public_key.write_text("ssh-ed25519 AAAATEST test", encoding="utf-8")
+    env.write_text("APP_ENV=stage", encoding="utf-8")
+    config.server.ssh_key = key
+    config.server.public_key = public_key
+    config.application.env_file = env
+    runner = Mock()
+    checksum, _ = deployment_manifest(config)
+
+    deploy(
+        repo,
+        global_config,
+        config,
+        runner,
+        dry_run=True,
+        allowed_volume_changes=["uploads", "cache", "uploads"],
+    )
+
+    site = next(call for call in runner.playbook.call_args_list if call.args[0] == "site.yml")
+    assert site.args[2]["app_allowed_volume_changes"] == ["cache", "uploads"]
+    assert site.args[2]["deployment_checksum"] == checksum
 
 
 def test_restore_prepares_target_before_import_and_rechecks_health(tmp_path: Path) -> None:

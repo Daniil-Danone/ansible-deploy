@@ -1,0 +1,85 @@
+---
+# Fails closed before any container change when a release switch would make
+# Compose create new EMPTY named volumes or stop mounting existing ones.
+# Inputs:
+#   volume_continuity_guard_project          Compose project name (-p)
+#   volume_continuity_guard_current_compose  remote path of the active release Compose file
+#   volume_continuity_guard_target_compose   parsed Compose document that is about to be applied
+#   volume_continuity_guard_allowed_changes  volume keys whose addition/removal is acknowledged
+#   volume_continuity_guard_check_removed    also reject volumes dropped by the target (default true)
+#   volume_continuity_guard_hint             operator action appended to the failure message
+- name: Read active release Compose definition
+  ansible.builtin.slurp:
+    src: "{{ volume_continuity_guard_current_compose }}"
+  register: volume_continuity_guard_current_raw
+  no_log: true
+
+- name: Define current and target named volume definitions
+  ansible.builtin.set_fact:
+    volume_continuity_guard_current_definitions: >-
+      {{ (volume_continuity_guard_current_raw.content | b64decode | from_yaml).volumes
+      | default({}, true) }}
+    volume_continuity_guard_target_definitions: >-
+      {{ volume_continuity_guard_target_compose.volumes | default({}, true) }}
+
+- name: Require deterministic Compose-managed volume names
+  ansible.builtin.assert:
+    that:
+      - volume_continuity_guard_current_definitions is mapping
+      - volume_continuity_guard_target_definitions is mapping
+      - >-
+        (volume_continuity_guard_current_definitions.values() | list
+        + volume_continuity_guard_target_definitions.values() | list)
+        | reject('none') | reject('equalto', {}) | list | length == 0
+    fail_msg: >-
+      Volume continuity check requires plain top-level named volumes (no name:,
+      external: or driver options) in both the active and the new release Compose file
+
+- name: List existing Docker volumes
+  ansible.builtin.command:
+    argv: [docker, volume, ls, --quiet]
+  changed_when: false
+  check_mode: false
+  register: volume_continuity_guard_docker_volumes
+
+- name: Compare named volumes of active and target releases
+  vars:
+    volume_continuity_guard_prefix: "{{ volume_continuity_guard_project }}_"
+    volume_continuity_guard_allowed: "{{ volume_continuity_guard_allowed_changes | default([]) }}"
+    volume_continuity_guard_current_keys: "{{ volume_continuity_guard_current_definitions.keys() | list }}"
+    volume_continuity_guard_target_keys: "{{ volume_continuity_guard_target_definitions.keys() | list }}"
+    volume_continuity_guard_existing_keys: >-
+      {{ volume_continuity_guard_docker_volumes.stdout_lines
+      | select('match', '^' ~ (volume_continuity_guard_prefix | regex_escape))
+      | map('regex_replace', '^' ~ (volume_continuity_guard_prefix | regex_escape), '')
+      | list }}
+  ansible.builtin.set_fact:
+    volume_continuity_guard_removed: >-
+      {{ (volume_continuity_guard_current_keys | difference(volume_continuity_guard_target_keys)
+      | difference(volume_continuity_guard_allowed) | sort)
+      if volume_continuity_guard_check_removed | default(true) | bool else [] }}
+    volume_continuity_guard_missing: >-
+      {{ volume_continuity_guard_target_keys | difference(volume_continuity_guard_existing_keys)
+      | difference(volume_continuity_guard_allowed) | sort }}
+
+- name: Reject releases that would orphan data or start on empty volumes
+  ansible.builtin.fail:
+    msg: >-
+      Volume continuity check failed for Compose project
+      '{{ volume_continuity_guard_project }}'; no containers were changed.
+      {%- if volume_continuity_guard_removed | length > 0 %}
+      The new Compose file no longer declares volume(s) used by the active release:
+      {{ volume_continuity_guard_removed | map('regex_replace', '^', volume_continuity_guard_project ~ '_')
+      | join(', ') }} (their data would stay on the server but no longer be mounted).
+      {%- endif %}
+      {%- if volume_continuity_guard_missing | length > 0 %}
+      The new Compose file declares volume(s) that do not exist yet:
+      {{ volume_continuity_guard_missing | map('regex_replace', '^', volume_continuity_guard_project ~ '_')
+      | join(', ') }} (Docker Compose would create them EMPTY).
+      {%- endif %}
+      A renamed volume key or a changed Compose project name causes this; restore
+      the previous names (check 'docker volume ls' on the server).
+      {{ volume_continuity_guard_hint | default('') }}
+  when: >-
+    volume_continuity_guard_removed | length > 0
+    or volume_continuity_guard_missing | length > 0

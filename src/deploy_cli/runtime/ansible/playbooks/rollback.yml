@@ -33,6 +33,26 @@
       changed_when: false
       check_mode: false
 
+    - name: Read rollback target Compose definition
+      ansible.builtin.slurp:
+        src: "{{ release_targets.results[1].stdout }}/compose.yml"
+      register: rollback_target_compose_raw
+      no_log: true
+
+    - name: Require rollback target volumes to still exist
+      ansible.builtin.include_role:
+        name: volume_continuity_guard
+      vars:
+        volume_continuity_guard_project: "{{ app_compose_project }}"
+        volume_continuity_guard_current_compose: "{{ release_targets.results[0].stdout }}/compose.yml"
+        volume_continuity_guard_target_compose: >-
+          {{ rollback_target_compose_raw.content | b64decode | from_yaml }}
+        # Rolling back an intentional volume addition legitimately leaves it unmounted.
+        volume_continuity_guard_check_removed: false
+        volume_continuity_guard_hint: >-
+          Rollback would start the previous release on empty volumes; restore the
+          listed volumes from backup before rolling back.
+
     - name: Persist rollback transaction before candidate activation
       ansible.builtin.copy:
         dest: "{{ app_dir }}/transaction.json"

@@ -13,8 +13,8 @@ deploy project init
 deploy project sync [--check]
 deploy secrets path [--new-project-id]
 deploy images publish <stage|prod> ...
-deploy stage [--dry-run] [--version SHA]
-deploy prod [--dry-run] [--version SHA] [--yes]
+deploy stage [--dry-run] [--version SHA] [--allow-volume-change NAME ...]
+deploy prod [--dry-run] [--version SHA] [--yes] [--allow-volume-change NAME ...]
 deploy status <stage|prod>
 deploy rollback prod [--yes]
 deploy server update <stage|prod|monitoring|all> [--dry-run] [--yes]
@@ -33,6 +33,12 @@ deploy backup restore prod --target restore --backup ID [--yes]
 `--dry-run` применяет Ansible check mode там, где он безопасен, и не выполняет
 bootstrap с password. Production-changing commands требуют интерактивного `prod`; в
 non-interactive protected CI используется `--yes`.
+
+`--allow-volume-change NAME` (можно повторять) подтверждает, что Compose volume `NAME`
+намеренно добавлен или удалён в этом release. Без него deploy поверх активного release
+останавливается до изменения контейнеров, если набор named volumes не совпадает с
+активным release и существующими Docker volumes — см.
+[непрерывность named volumes](../concepts/server-state.md#непрерывность-named-volumes).
 
 Код `0` означает доказанный успех команды, `2` — configuration/security boundary;
 runner возвращает ненулевой код underlying operation. Не анализируйте только текст:

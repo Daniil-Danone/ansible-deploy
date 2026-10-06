@@ -52,7 +52,8 @@ def test_alloy_level_label_has_only_five_normalized_values() -> None:
         assert level in template
     assert 'source_labels = ["__journal_priority_keyword"]' in template
     assert "stage.json" in template and 'level = "level",' in template
-    assert "stage.logfmt" in template
+    assert "stage.regex" in template and "(?P<level>" in template
+    assert "stage.logfmt" not in template
     assert 'source   = "level"' in template
     assert 'level = "level"' in template
     assert 'regex         = "emerg|alert|crit"' in template

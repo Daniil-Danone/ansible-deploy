@@ -44,7 +44,11 @@ Production job привязан к GitHub Environment `production`. Именно
    `REGISTRY_PREFIX` (например, `ghcr.io/owner`), `REGISTRY_HOST` (по умолчанию `ghcr.io`),
    `STAGE_HEALTH_URL`, `PRODUCTION_HEALTH_URL` и `QUALITY_COMMAND`. Имена repositories
    берутся из `image` каждого service в `.deploy/images.yml`.
-4. В `stage` и `production` создайте secret `ANSIBLE_DEPLOY_SECRET_STORE_JSON`. Reusable
+4. Установите GitHub CLI (`gh`), выполните `gh auth login --hostname github.com`
+   и из application project
+   загрузите external secret store командой `ansible-deploy secrets github upload
+   --repo OWNER/REPO` (подробности ниже). Она создаст/обновит
+   `ANSIBLE_DEPLOY_SECRET_STORE_JSON` в `stage`, `production` и `monitoring`. Reusable
    job читает его после входа в соответствующий Environment; caller не передаёт этот
    secret через `workflow_call`.
 5. В `monitoring`, `stage` и `production` создайте `CLI_REPOSITORY_TOKEN`: fine-grained token с
@@ -72,18 +76,43 @@ Production job привязан к GitHub Environment `production`. Именно
     версии вместе, только после review соответствующего upstream release; mutable
     `@vN`, branch и tag в рабочих workflow запрещены.
 
-Secret JSON — mapping относительного пути external store на base64 bytes:
+## Загрузка external secret store
 
-```json
-{
-  "environments/stage/app.env": "QVBQX0VOVj1zdGFnZQo=",
-  "environments/stage/bot.env": "BASE64_BOT_ENV_BYTES",
-  "keys/stage_ed25519": "BASE64_PRIVATE_KEY_BYTES"
-}
+Environments должны уже существовать. У авторизованного в `gh` аккаунта должны быть
+права на управление их secrets. В терминале application project выполните:
+
+```bash
+gh auth login --hostname github.com
+ansible-deploy secrets github upload --repo OWNER/REPO --check
+ansible-deploy secrets github upload --repo OWNER/REPO
 ```
 
-Каждый `application.extra_env_files[].source` добавляется в тот же JSON отдельным
-ключом с тем же относительным путём; без него deploy остановится на preflight.
+Для `uwords` в собственном форке используйте `--repo Daniil-Danone/uwords`. Repository
+всегда задаётся явно и находится на `github.com`: default host и `GH_HOST` игнорируются.
+CLI читает пути из `.deploy/environments/<environment>/config.yml`
+и существующие безопасные файлы external store, затем собирает отдельный JSON для
+каждого Environment. `stage` загружается в `stage`, `prod` — в `production`,
+`monitoring` — в `monitoring`; backup/restore credentials не включаются.
+
+В набор входят private/public SSH keys, application env, все
+`application.extra_env_files[].source`, optional registry auth и collector password;
+для monitoring — keys и `monitoring.secrets_file`. JSON mapping содержит portable
+relative paths и base64 исходных байтов. Все выбранные наборы проходят локальные
+проверки до первой загрузки. `--check` дополнительно проверяет авторизацию и доступ к
+repository, но не права записи или наличие Environments. JSON не должен превышать
+GitHub limit 48 KiB. Команда передаёт payload только через stdin `gh`, без временных
+файлов, вывода значений или внешних путей.
+
+После изменения секретов можно обновить только нужные окружения:
+
+```bash
+ansible-deploy secrets github upload --repo OWNER/REPO --environment stage --environment monitoring
+```
+
+Option `--environment` повторяется; без него загружаются все три окружения. Повторная
+загрузка заменяет существующее значение secret. При ошибке сети часть загрузок могла
+уже завершиться — устраните причину и повторите команду. `CLI_REPOSITORY_TOKEN`,
+`REGISTRY_USERNAME`, `REGISTRY_TOKEN` и repository variables задаются отдельно.
 
 Не добавляйте JSON в repository, artifacts, step summary или debug output. Reusable
 workflow материализует files под `${{ runner.temp }}` с restrictive modes и удаляет
@@ -115,8 +144,8 @@ GitHub Environment `monitoring`. Эта команда проверяет manage
 SSH fingerprints должны быть предварительно подтверждены через `trust monitoring`;
 первичная автоматическая установка требует key-based bootstrap access.
 
-В `monitoring` создайте свой `ANSIBLE_DEPLOY_SECRET_STORE_JSON` с monitoring secret,
-private/public SSH keys по путям из `.deploy/environments/monitoring/config.yml`.
+`secrets github upload` создаёт в `monitoring` отдельный `ANSIBLE_DEPLOY_SECRET_STORE_JSON`
+с monitoring secret и private/public SSH keys по путям из monitoring config.
 Credentials мониторинга не нужно дублировать в app Environments. Все обновления общего
 monitoring сервера сериализованы в одной concurrency group независимо от app target;
 ошибка monitoring блокирует application deploy. Environment `production` по-прежнему

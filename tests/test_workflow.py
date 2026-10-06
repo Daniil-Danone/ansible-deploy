@@ -714,3 +714,30 @@ def test_collector_deploy_guards_identity_then_reconciles_and_verifies() -> None
     collector = runner.playbook.call_args_list[1]
     assert config.collector is not None
     assert collector.kwargs["observability_secret_file"] == config.collector.password_file
+
+
+def test_cd_monitoring_bootstraps_once_then_reconciles_on_next_deploy() -> None:
+    repo = Path(__file__).parents[1] / "examples/demo-app"
+    global_config, config = load_configuration(repo, "monitoring")
+    runner = Mock()
+    managed_available = False
+
+    def playbook(name, *args, **kwargs):
+        nonlocal managed_available
+        if name == "verify_deploy_access.yml" and not managed_available:
+            managed_available = True
+            raise RunnerError("Managed access is not installed yet", 4)
+
+    runner.playbook.side_effect = playbook
+    deploy_monitoring(repo, global_config, config, runner, dry_run=False)
+    deploy_monitoring(repo, global_config, config, runner, dry_run=False)
+
+    names = [call.args[0] for call in runner.playbook.call_args_list]
+    assert names.count("bootstrap.yml") == 1
+    assert names.count("monitoring.yml") == 2
+    assert names.count("monitoring_status.yml") == 2
+    guards = [call for call in runner.playbook.call_args_list if call.args[0] == (
+        "guard_environment.yml"
+    )]
+    assert guards[0].args[2]["require_unclaimed_environment"] is True
+    assert "require_unclaimed_environment" not in guards[1].args[2]

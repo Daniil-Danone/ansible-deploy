@@ -2,12 +2,140 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from deploy_cli import cli
 from deploy_cli.config import load_configuration
 from deploy_cli.models import EnvironmentConfig
-from deploy_cli.project import SCAFFOLD_VERSION, STATE_PATH, sync_project
+from deploy_cli.project import CD_PATH, SCAFFOLD_VERSION, STATE_PATH, WORKFLOW_PATH, sync_project
+
+
+def _generated_workflow(project: Path) -> dict:
+    return yaml.load(
+        (project / WORKFLOW_PATH).read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,  # noqa: S506 - strings and collections only
+    )
+
+
+def test_init_generates_cd_with_default_branch_and_event_boundaries(tmp_path: Path) -> None:
+    assert cli.run(["--project-dir", str(tmp_path), "project", "init"]) == 0
+    workflow = _generated_workflow(tmp_path)
+    jobs = workflow["jobs"]
+
+    assert workflow["on"]["push"]["branches"] == ["develop"]
+    assert jobs["stage"]["if"] == (
+        "(github.event_name == 'push' && github.ref == 'refs/heads/develop')"
+    )
+    assert jobs["production"]["if"] == (
+        "github.event_name == 'workflow_dispatch' && inputs.deploy_production && "
+        "github.ref == 'refs/heads/main'"
+    )
+    assert jobs["production"]["needs"] == ["quality", "collect_images"]
+    assert "pull_request" in workflow["on"]
+    assert "github.event_name == 'push'" in jobs["image_plan"]["if"]
+    assert "github.ref == 'refs/heads/main'" in jobs["image_plan"]["if"]
+    assert "workflow_dispatch" in workflow["on"]
+
+
+def test_custom_init_branches_and_immutable_pin_survive_workflow_upgrade(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from deploy_cli import project
+
+    sha = "a" * 40
+    assert cli.run([
+        "--project-dir", str(tmp_path), "project", "init",
+        "--stage-branch", "release/stage", "--production-branch", "release/prod",
+        "--tool-sha", sha,
+    ]) == 0
+    config = (tmp_path / CD_PATH).read_bytes()
+    templates = project._template_files()
+    templates[WORKFLOW_PATH] += b"# new delivery feature\n"
+    monkeypatch.setattr(project, "_template_files", lambda: templates)
+
+    result = sync_project(tmp_path)
+    workflow = _generated_workflow(tmp_path)
+
+    assert not result.conflicts
+    assert WORKFLOW_PATH in result.updated
+    assert (tmp_path / CD_PATH).read_bytes() == config
+    assert workflow["on"]["push"]["branches"] == ["release/stage"]
+    assert "refs/heads/release/prod" in workflow["jobs"]["production"]["if"]
+    for name in ("stage", "production"):
+        assert workflow["jobs"][name]["uses"].endswith("@" + sha)
+        assert workflow["jobs"][name]["with"]["tool_sha"] == sha
+    assert not sync_project(tmp_path, check=True).changes_required
+
+
+def test_sync_renders_edited_cd_settings_without_overwriting_them(tmp_path: Path) -> None:
+    sync_project(tmp_path)
+    path = tmp_path / CD_PATH
+    settings = yaml.safe_load(path.read_text(encoding="utf-8"))
+    settings["stage_branch"] = "staging"
+    settings["production_branch"] = "production"
+    settings["tool_sha"] = "b" * 40
+    path.write_text("# Keep local comments\n" + yaml.safe_dump(settings), encoding="utf-8")
+    before = path.read_bytes()
+
+    assert WORKFLOW_PATH in sync_project(tmp_path, check=True).updated
+    result = sync_project(tmp_path)
+
+    assert not result.conflicts
+    assert path.read_bytes() == before
+    workflow = _generated_workflow(tmp_path)
+    assert workflow["on"]["push"]["branches"] == ["staging"]
+    assert "refs/heads/production" in workflow["jobs"]["production"]["if"]
+
+
+@pytest.mark.parametrize("option", ["--stage-branch", "--production-branch"])
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "feature/*", "release?", "release+", "!develop", "x[y]", "x]",
+        "a b", "a..b", "@{bad", "x.lock",
+    ],
+)
+def test_init_rejects_invalid_or_glob_branch_before_writing(
+    tmp_path: Path, branch: str, option: str
+) -> None:
+    assert cli.run([
+        "--project-dir", str(tmp_path), "project", "init", option, branch,
+    ]) == 2
+    assert not (tmp_path / ".deploy").exists()
+    assert not (tmp_path / ".github").exists()
+
+
+def test_generic_image_plan_does_not_require_application_python_dependency_files(
+    tmp_path: Path,
+) -> None:
+    sync_project(tmp_path)
+    workflow = _generated_workflow(tmp_path)
+    setup_python = next(
+        step for step in workflow["jobs"]["image_plan"]["steps"]
+        if step.get("uses", "").startswith("actions/setup-python@")
+    )
+
+    assert not (tmp_path / "requirements.txt").exists()
+    assert not (tmp_path / "pyproject.toml").exists()
+    assert "cache" not in setup_python["with"]
+    assert "cache-dependency-path" not in setup_python["with"]
+
+
+def test_branch_quotes_cannot_change_workflow_structure(tmp_path: Path) -> None:
+    branch = "feature/quote'\"name"
+    sync_project(tmp_path, stage_branch=branch, production_branch=branch)
+    workflow = _generated_workflow(tmp_path)
+
+    assert workflow["on"]["push"]["branches"] == [branch]
+    assert "refs/heads/feature/quote''\"name" in workflow["jobs"]["production"]["if"]
+
+
+def test_init_rejects_mutable_cli_ref(tmp_path: Path) -> None:
+    assert cli.run([
+        "--project-dir", str(tmp_path), "project", "init", "--tool-sha", "main",
+    ]) == 2
+    assert not (tmp_path / ".deploy").exists()
 
 
 def test_init_is_idempotent_and_creates_all_environment_skeletons(tmp_path: Path) -> None:
@@ -191,3 +319,5 @@ def test_wheel_contains_scaffold_and_init_works_outside_checkout(
 
     assert result.returncode == 0, result.stderr
     assert (application / ".deploy/environments/prod/config.yml").is_file()
+    assert (application / WORKFLOW_PATH).is_file()
+    assert (application / CD_PATH).is_file()

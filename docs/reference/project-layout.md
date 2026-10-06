@@ -7,11 +7,13 @@ application/
 │   ├── template-state.yml         # scaffold version + hashes
 │   ├── config/global.yml
 │   ├── images.yml
+│   ├── cd.yml                     # project-owned CD branches + immutable CLI SHA
 │   └── environments/
 │       ├── stage/config.yml
 │       ├── prod/config.yml
 │       ├── monitoring/config.yml
 │       └── restore/config.yml
+├── .github/workflows/deploy.yml   # managed GitHub Actions caller
 ├── deploy/
 │   ├── compose.stage.yml
 │   ├── compose.prod.yml

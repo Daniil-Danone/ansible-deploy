@@ -128,7 +128,18 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     project_command = sub.add_parser("project", help="Initialize or update project files")
     project_sub = project_command.add_subparsers(dest="project_command", required=True)
-    project_sub.add_parser("init", help="Create a commit-safe deployment scaffold")
+    project_init = project_sub.add_parser(
+        "init", help="Create deployment scaffold and GitHub Actions CD workflow"
+    )
+    project_init.add_argument(
+        "--stage-branch", help="branch for automatic Stage deployments (default: develop)"
+    )
+    project_init.add_argument(
+        "--production-branch", help="branch allowed for manual Production (default: main)"
+    )
+    project_init.add_argument(
+        "--tool-sha", help="reviewed full CLI commit SHA for the reusable workflow"
+    )
     project_sync = project_sub.add_parser("sync", help="Update managed scaffold files")
     project_sync.add_argument(
         "--check", action="store_true", help="report pending updates without writing files"
@@ -441,8 +452,16 @@ def run(argv: list[str] | None = None) -> int:
             result = sync_project(
                 project_dir,
                 check=args.project_command == "sync" and args.check,
+                stage_branch=getattr(args, "stage_branch", None),
+                production_branch=getattr(args, "production_branch", None),
+                tool_sha=getattr(args, "tool_sha", None),
             )
             _print_project_result(result)
+            if args.project_command == "init" and not result.conflicts:
+                print(
+                    "[NEXT] Configure .deploy/cd.yml tool_sha and GitHub Environments, "
+                    "secrets and variables; see the CI/CD guide"
+                )
             return 1 if result.conflicts or (result.check and result.changes_required) else 0
         if args.command == "trust":
             return trust_environment(

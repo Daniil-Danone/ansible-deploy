@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,9 @@ RUNTIME_HASH_LABEL = "io.ansible-deploy.runtime-sha256"
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 FAILURE_OUTPUT_LINES = 400
 FAILURE_OUTPUT_LINE_BYTES = 16 * 1024
+# A crypt SHA-512 salt reaches argv, so only the alphabet crypt(3) itself defines is
+# accepted: a hash from the monitoring secret file is operator input, not a trusted value.
+CRYPT_SALT_PATTERN = re.compile(r"(?:rounds=\d{1,9}\$)?[A-Za-z0-9./]{1,16}")
 
 
 class RunnerError(RuntimeError):
@@ -217,6 +221,56 @@ class AnsibleRunner:
             self.runtime_image,
             "passwd",
             "-6",
+            "-stdin",
+        ]
+        completed = False
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed executable and argument vector
+                args,
+                cwd=self.repo,
+                input=password + "\n",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=60,
+            )
+            completed = True
+        except KeyboardInterrupt:
+            raise
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RunnerError("Unable to compute the crypt SHA-512 hash", 5) from exc
+        finally:
+            if not completed:
+                self._cleanup_container(container_name)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if result.returncode != 0 or len(lines) != 1 or not lines[0].startswith("$6$"):
+            detail = self.redactor(result.stderr.strip())
+            raise RunnerError(
+                f"Password hashing failed: {detail or 'no crypt SHA-512 hash returned'}", 5
+            )
+        return lines[0]
+
+    def openssl_password_hash_with_salt(self, password: str, salt: str) -> str:
+        """Recompute a crypt SHA-512 hash with a known salt, never putting the password in argv."""
+        if not CRYPT_SALT_PATTERN.fullmatch(salt):
+            raise RunnerError("Crypt SHA-512 salt is not safe to pass to openssl", 5)
+        container_name = self._container_name()
+        args = [
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "--name",
+            container_name,
+            "--entrypoint",
+            "openssl",
+            self.runtime_image,
+            "passwd",
+            "-6",
+            "-salt",
+            salt,
             "-stdin",
         ]
         completed = False

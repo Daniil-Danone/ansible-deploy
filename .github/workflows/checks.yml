@@ -51,8 +51,10 @@ jobs:
           read_version() {
             grep '^__version__' "$1" | cut -d'"' -f2
           }
-          git fetch --depth=1 origin "$BASE_REF"
-          git show "FETCH_HEAD:src/deploy_cli/__init__.py" > /tmp/base_init.py
+          # fetch-depth: 0 above already fetched every branch, and the checkout
+          # drops its credentials, so read the base branch from the local remote
+          # ref instead of fetching it again.
+          git show "origin/$BASE_REF:src/deploy_cli/__init__.py" > /tmp/base_init.py
           base="$(read_version /tmp/base_init.py)"
           head="$(read_version src/deploy_cli/__init__.py)"
           echo "base=$base head=$head"

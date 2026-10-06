@@ -14,6 +14,7 @@
     owner: root
     group: root
     mode: "0600"
+  notify: Restart Alloy collector
   no_log: true
 
 - name: Install declarative Alloy collector configuration
@@ -23,6 +24,7 @@
     owner: root
     group: root
     mode: "0644"
+  notify: Restart Alloy collector
 
 - name: Install collector Compose definition without public ports
   ansible.builtin.copy:
@@ -114,3 +116,9 @@
         msg: >-
           {{ collector_compose_failure_reason }}
           (code {{ collector_compose_failure_rc }}); safe diagnostics are shown above
+
+# Handlers must run after the reconciliation block, not at the end of the play:
+# on a first run the container does not exist yet and `state: restarted` would
+# fail, while `state: present` above creates it with the already-current files.
+- name: Apply changed collector configuration and credentials
+  ansible.builtin.meta: flush_handlers

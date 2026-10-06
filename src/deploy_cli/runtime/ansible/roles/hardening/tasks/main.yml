@@ -18,6 +18,12 @@
       PermitRootLogin prohibit-password
       X11Forwarding no
       MaxAuthTries 3
+      # The default 10:30:100 preauth queue overflows under a password scan and
+      # sshd then drops NEW connections before the version exchange, which looks
+      # like "kex_exchange_identification: Connection closed by remote host".
+      MaxStartups 100:30:200
+      # Bots connect and stay silent; a short grace frees their slots quickly.
+      LoginGraceTime 20
       Include /etc/ssh/sshd_config
   when: hardening_controls.ssh and not ansible_check_mode
 
@@ -34,6 +40,8 @@
       - "'passwordauthentication no' in staged_sshd.stdout_lines"
       - "'kbdinteractiveauthentication no' in staged_sshd.stdout_lines"
       - "'pubkeyauthentication yes' in staged_sshd.stdout_lines"
+      - "'maxstartups 100:30:200' in staged_sshd.stdout_lines"
+      - "'logingracetime 20' in staged_sshd.stdout_lines"
       # sshd -T prints the legacy alias on OpenSSH 9.6 (Ubuntu 24.04)
       # and the canonical prohibit-password on OpenSSH 10.2 (Ubuntu 26.04).
       - >-
@@ -63,6 +71,12 @@
       PermitRootLogin prohibit-password
       X11Forwarding no
       MaxAuthTries 3
+      # The default 10:30:100 preauth queue overflows under a password scan and
+      # sshd then drops NEW connections before the version exchange, which looks
+      # like "kex_exchange_identification: Connection closed by remote host".
+      MaxStartups 100:30:200
+      # Bots connect and stay silent; a short grace frees their slots quickly.
+      LoginGraceTime 20
   notify: Restart ssh
   when: hardening_controls.ssh
 
@@ -80,6 +94,8 @@
       - "'passwordauthentication no' in effective_sshd.stdout_lines"
       - "'kbdinteractiveauthentication no' in effective_sshd.stdout_lines"
       - "'pubkeyauthentication yes' in effective_sshd.stdout_lines"
+      - "'maxstartups 100:30:200' in effective_sshd.stdout_lines"
+      - "'logingracetime 20' in effective_sshd.stdout_lines"
       - >-
         'permitrootlogin prohibit-password' in effective_sshd.stdout_lines
         or 'permitrootlogin without-password' in effective_sshd.stdout_lines
@@ -177,6 +193,30 @@
   community.general.ufw:
     state: disabled
   when: not hardening_controls.firewall
+
+- name: Install managed fail2ban sshd jail
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/zz-ansible-deploy.local
+    owner: root
+    group: root
+    mode: "0644"
+    # The zz- prefix keeps this jail last in jail.d so it wins over the Debian
+    # defaults, which ban too late to matter against a distributed scan.
+    content: |
+      [sshd]
+      enabled = true
+      port = {{ deploy_ssh_port }}
+      maxretry = 3
+      findtime = 10m
+      bantime = 24h
+  notify: Restart fail2ban
+  when: hardening_controls.fail2ban
+
+- name: Remove managed fail2ban sshd jail when explicitly configured off
+  ansible.builtin.file:
+    path: /etc/fail2ban/jail.d/zz-ansible-deploy.local
+    state: absent
+  when: not hardening_controls.fail2ban
 
 - name: Enable fail2ban
   ansible.builtin.service:

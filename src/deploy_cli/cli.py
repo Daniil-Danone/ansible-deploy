@@ -22,6 +22,7 @@ from .config import (
     validate_registry_auth,
     validate_restore_isolation,
 )
+from .github_secrets import GITHUB_ENVIRONMENTS, upload_github_secrets, validate_repository
 from .images import publish_images
 from .keys import ensure_deploy_key
 from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig, is_backup_identifier
@@ -233,6 +234,27 @@ def _parser() -> argparse.ArgumentParser:
     secrets_sub.add_parser(
         "hash-password", help="Hash a password with crypt SHA-512 for monitoring"
     )
+    github = secrets_sub.add_parser("github", help="Manage deployment secrets in GitHub")
+    github_sub = github.add_subparsers(dest="github_command", required=True)
+    github_upload = github_sub.add_parser("upload", help="Upload configured secret files using gh")
+    github_upload.add_argument(
+        "--repo",
+        dest="github_repository",
+        required=True,
+        type=_github_repository,
+        metavar="OWNER/REPO",
+    )
+    github_upload.add_argument(
+        "--environment",
+        action="append",
+        choices=list(GITHUB_ENVIRONMENTS),
+        help="environment to upload (repeatable; default: stage, prod, monitoring)",
+    )
+    github_upload.add_argument(
+        "--check",
+        action="store_true",
+        help="validate files and gh access without uploading secrets",
+    )
     rotate_collector = secrets_sub.add_parser(
         "rotate-collector-password",
         help="Write a new collector push password and its monitoring hash together",
@@ -295,6 +317,13 @@ def _volume_key(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
         raise argparse.ArgumentTypeError(f"invalid Compose volume name: {value!r}")
     return value
+
+
+def _github_repository(value: str) -> str:
+    try:
+        return validate_repository(value)
+    except ConfigurationError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _deployment_version(repo: Path, supplied: str | None) -> str:
@@ -472,6 +501,13 @@ def run(argv: list[str] | None = None) -> int:
                 force=args.force,
             )
         if args.command == "secrets":
+            if args.secrets_command == "github":
+                return upload_github_secrets(
+                    project_dir,
+                    repository=args.github_repository,
+                    environments=args.environment,
+                    check=args.check,
+                )
             if args.secrets_command == "init":
                 return initialize_secret_store(project_dir, args.environment)
             if args.secrets_command == "hash-password":

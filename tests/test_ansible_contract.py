@@ -273,6 +273,126 @@ def test_collector_contract_has_bounded_labels_docker_journald_and_no_ports() ->
     assert "ports:" not in tasks
 
 
+def test_collector_restarts_alloy_when_config_or_password_changes() -> None:
+    # Alloy reads config.alloy and the bind-mounted password only at start, so a
+    # changed file without a restart keeps the stale credentials in effect.
+    tasks = _yaml("ansible/roles/collector/tasks/main.yml")
+    handlers = _yaml("ansible/roles/collector/handlers/main.yml")
+    by_name = {str(task.get("name")): task for task in tasks}
+    names = [str(task.get("name")) for task in tasks]
+    handler = next(handler for handler in handlers if handler["name"] == "Restart Alloy collector")
+
+    for name in (
+        "Deliver collector password securely",
+        "Install declarative Alloy collector configuration",
+    ):
+        assert by_name[name]["notify"] == "Restart Alloy collector", name
+    compose = handler["community.docker.docker_compose_v2"]
+    assert isinstance(compose, dict)
+    assert compose["state"] == "restarted"
+    assert compose["project_src"] == "{{ collector_dir }}"
+    assert compose["project_name"] == "ansible_deploy_collector_{{ app_environment }}"
+    assert handler["no_log"] is True
+    # Check mode skips the reconciliation block, so there is no container to restart.
+    assert "not ansible_check_mode" in str(handler["when"])
+    # Handlers are flushed after reconciliation: a first run has no container yet
+    # and `state: restarted` would fail before `state: present` created it.
+    flush = "Apply changed collector configuration and credentials"
+    assert by_name[flush]["ansible.builtin.meta"] == "flush_handlers"
+    assert names.index("Reconcile Alloy collector with safe failure diagnostics") < names.index(
+        flush
+    )
+
+
+def test_collector_status_probes_authenticated_push_instead_of_container_state() -> None:
+    play = _yaml("ansible/playbooks/collector_status.yml")[0]
+    tasks = play["tasks"]
+    assert isinstance(tasks, list)
+    by_name = {str(task.get("name")): task for task in tasks}
+    secret = by_name["Read collector push credentials from the managed secret file"]
+    probe = by_name["Probe authenticated Loki push with the collector credentials"]
+    guard = by_name["Require Loki to accept the collector push credentials"]
+
+    # A running Alloy retries a 401 forever, so container state alone is green
+    # while no log line reaches Loki.
+    assert by_name["Require Alloy collector to be running"]["ansible.builtin.assert"]["that"] == [  # type: ignore[index]
+        "alloy_container.exists",
+        "alloy_container.container.State.Status == 'running'",
+    ]
+    # The password lives on the managed host, so it must be read there, not by a
+    # controller-side lookup.
+    assert secret["ansible.builtin.slurp"]["path"] == "{{ collector_dir }}/push.password"  # type: ignore[index]
+    uri = probe["ansible.builtin.uri"]
+    assert isinstance(uri, dict)
+    assert uri["url"] == "{{ collector_push_url }}"
+    assert uri["method"] == "POST"
+    assert uri["url_username"] == "{{ collector_username }}"
+    assert "collector_push_secret.content | b64decode" in str(uri["url_password"])
+    assert uri["force_basic_auth"] is True
+    assert uri["body_format"] == "json"
+    assert uri["status_code"] == 204
+    stream = uri["body"]["streams"][0]  # type: ignore[index]
+    # A dedicated service label keeps probes out of the application series.
+    assert stream["stream"]["service"] == "ansible-deploy-probe"
+    assert stream["stream"]["environment"] == "{{ app_environment }}"
+    assert stream["values"][0][0].endswith("000000000")
+    # Secrets never reach the Ansible output the CLI shows to the user.
+    for task in (secret, probe):
+        assert task["no_log"] is True
+    # The assert must stay loggable, otherwise its remediation hint is hidden.
+    assert "no_log" not in guard
+    assert guard["ansible.builtin.assert"]["that"] == ["collector_push_probe.status == 204"]  # type: ignore[index]
+    fail_msg = str(guard["ansible.builtin.assert"]["fail_msg"])  # type: ignore[index]
+    assert "deploy secrets check-collector-password" in fail_msg
+    assert "collector_push_probe.status == 401" in fail_msg
+    # Check mode must not push anything, so every probe task is skipped there.
+    for task in (secret, probe, guard):
+        assert str(task["when"]) == "not ansible_check_mode"
+
+
+def test_ssh_survives_bruteforce_scan_and_fail2ban_jail_is_managed() -> None:
+    tasks = _yaml("ansible/roles/hardening/tasks/main.yml")
+    handlers = _yaml("ansible/roles/hardening/handlers/main.yml")
+    by_name = {str(task.get("name")): task for task in tasks}
+    staged = by_name["Stage effective SSH configuration for validation"]
+    installed = by_name["Install early hardened SSH drop-in"]
+    jail = by_name["Install managed fail2ban sshd jail"]
+    removal = by_name["Remove managed fail2ban sshd jail when explicitly configured off"]
+
+    # Both copies carry the same directives, otherwise the sshd -T asserts drift
+    # away from what is actually installed.
+    for task in (staged, installed):
+        content = str(task["ansible.builtin.copy"]["content"])  # type: ignore[index]
+        assert "MaxStartups 100:30:200" in content, task["name"]
+        assert "LoginGraceTime 20" in content, task["name"]
+    for register in ("staged_sshd", "effective_sshd"):
+        assertion = by_name[
+            "Assert staged SSH security controls"
+            if register == "staged_sshd"
+            else "Assert installed effective SSH security controls"
+        ]
+        checks = assertion["ansible.builtin.assert"]["that"]  # type: ignore[index]
+        assert f"'maxstartups 100:30:200' in {register}.stdout_lines" in checks
+        assert f"'logingracetime 20' in {register}.stdout_lines" in checks
+
+    # zz- keeps the jail last in jail.d so it overrides the Debian defaults.
+    assert jail["ansible.builtin.copy"]["dest"] == (  # type: ignore[index]
+        "/etc/fail2ban/jail.d/zz-ansible-deploy.local"
+    )
+    jail_content = str(jail["ansible.builtin.copy"]["content"])  # type: ignore[index]
+    for line in ("[sshd]", "enabled = true", "maxretry = 3", "findtime = 10m", "bantime = 24h"):
+        assert line in jail_content
+    # The jail must follow the managed SSH port instead of assuming 22.
+    assert "port = {{ deploy_ssh_port }}" in jail_content
+    assert jail["notify"] == "Restart fail2ban"
+    assert jail["when"] == "hardening_controls.fail2ban"
+    # Turning the control off must not leave a stale jail behind.
+    assert removal["ansible.builtin.file"]["state"] == "absent"  # type: ignore[index]
+    assert removal["when"] == "not hardening_controls.fail2ban"
+    assert "notify" not in removal
+    assert {str(handler["name"]) for handler in handlers} == {"Restart ssh", "Restart fail2ban"}
+
+
 def test_observability_playbooks_are_separate_from_application_release_flow() -> None:
     for playbook in ("monitoring.yml", "monitoring_update.yml", "collector.yml"):
         content = _text(f"ansible/playbooks/{playbook}")

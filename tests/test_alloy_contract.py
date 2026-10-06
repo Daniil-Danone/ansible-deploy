@@ -59,6 +59,31 @@ def test_alloy_level_label_has_only_five_normalized_values() -> None:
     assert 'regex         = "notice|info"' in template
 
 
+def test_journal_service_label_is_the_systemd_unit_with_journald_as_fallback() -> None:
+    # Relabel runs after the base labels, so `service` is the unit name
+    # (ssh.service, docker.service) and "journald" survives only for entries
+    # without _SYSTEMD_UNIT. Removing or inverting either half must fail here.
+    template = TEMPLATE.read_text(encoding="utf-8")
+    relabel_start = template.index('loki.relabel "journal"')
+    source_start = template.index('loki.source.journal "system"')
+    relabel = template[relabel_start:source_start]
+    source = template[source_start:]
+    unit_rule = relabel[relabel.index('source_labels = ["__journal__systemd_unit"]') :]
+    unit_rule = unit_rule[: unit_rule.index("}")]
+
+    assert relabel_start < source_start
+    assert 'regex         = "(.+)"' in unit_rule
+    assert 'target_label  = "service"' in unit_rule
+    # A replacement here would pin `service` to a constant and kill the granularity.
+    assert "replacement" not in unit_rule
+    assert "relabel_rules = loki.relabel.journal.rules" in source
+    assert 'service     = "journald",' in source
+    assert source.index("relabel_rules") < source.index('service     = "journald"')
+    # The fallback must stay documented so nobody trusts `service="journald"`.
+    assert "systemd unit name" in source[: source.index('service     = "journald"')]
+    assert "fallback" in source[: source.index('service     = "journald"')]
+
+
 def test_alloy_official_validation_gate_uses_same_pinned_image_as_collector() -> None:
     tasks = (ROLES / "collector/tasks/main.yml").read_text(encoding="utf-8")
     workflow = (ROOT / ".github/workflows/checks.yml").read_text(encoding="utf-8")

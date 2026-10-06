@@ -14,6 +14,8 @@ deploy project sync [--check]
 deploy secrets path [--new-project-id]
 deploy secrets init [<stage|prod|monitoring|restore|all>]
 deploy secrets hash-password
+deploy secrets rotate-collector-password [--environment <stage|prod|all>] [--password-stdin]
+deploy secrets check-collector-password [<stage|prod|all>]
 deploy trust <stage|prod|monitoring|restore> [--print] [--force]
 deploy images publish <stage|prod> ...
 deploy stage [--dry-run] [--version SHA] [--allow-volume-change NAME ...]
@@ -77,6 +79,23 @@ backup останавливаются до обращения к серверу 
 `secrets hash-password` дважды скрыто запрашивает пароль, считает crypt SHA-512 внутри
 runtime-контейнера (`openssl passwd -6`) и печатает в stdout только итоговый хеш; пароль
 не попадает в argv, вывод и на диск. Несовпадение паролей — код `2`.
+
+`secrets rotate-collector-password` генерирует новый случайный push-password и
+раскладывает обе его формы за один проход: plaintext в `collector.password` окружений
+(`--environment`, по умолчанию `all` — stage и prod) и crypt SHA-512 hash в
+`LOKI_PUSH_PASSWORD_HASH` файла `monitoring.secrets_file`. Остальные строки monitoring
+secret-файла, их порядок и комментарии остаются байт-в-байт, plaintext пишется ровно
+одной строкой без завершающего line ending, каждый файл заменяется атомарно и остаётся
+owner-only. Пароль не печатается и не попадает в argv; `--password-stdin` читает готовый
+пароль из stdin для automation. Отчёт — `[UPDATE]` по каждому файлу и `[OK]`; отсутствие
+строки `LOKI_PUSH_PASSWORD_HASH=` — код `2`, и ни один файл не меняется.
+
+`secrets check-collector-password [<environment>|all]` ничего не меняет: считает hash
+plaintext'а с солью из `LOKI_PUSH_PASSWORD_HASH` и сравнивает с ним. Совпадение — `[OK]
+<env> collector password matches the monitoring hash` и код `0`; расхождение — `[ERROR]`
+по окружению и код `2`. Эту же проверку делает preflight `collectors deploy|update`: при
+расхождении deploy останавливается до обращения к серверу, а без monitoring-окружения в
+проекте проверка тихо пропускается.
 
 Код `0` означает доказанный успех команды, `2` — configuration/security boundary;
 runner возвращает ненулевой код underlying operation. Не анализируйте только текст:

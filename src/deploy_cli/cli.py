@@ -28,7 +28,15 @@ from .models import EnvironmentConfig, GlobalConfig, MonitoringConfig, is_backup
 from .project import ProjectError, ProjectSyncResult, sync_project
 from .redaction import Redactor, secrets_from_env
 from .runner import AnsibleRunner, RunnerError
-from .secret_setup import SECRET_ENVIRONMENTS, hash_password, initialize_secret_store
+from .secret_setup import (
+    ROTATE_HINT,
+    SECRET_ENVIRONMENTS,
+    check_collector_password,
+    collector_password_mismatches,
+    hash_password,
+    initialize_secret_store,
+    rotate_collector_password,
+)
 from .secret_store import SecretStoreError, create_project_id, external_secret_root
 from .trust import TRUST_ENVIRONMENTS, trust_environment
 from .workflow import (
@@ -214,6 +222,31 @@ def _parser() -> argparse.ArgumentParser:
     secrets_sub.add_parser(
         "hash-password", help="Hash a password with crypt SHA-512 for monitoring"
     )
+    rotate_collector = secrets_sub.add_parser(
+        "rotate-collector-password",
+        help="Write a new collector push password and its monitoring hash together",
+    )
+    rotate_collector.add_argument(
+        "--environment",
+        default="all",
+        choices=["stage", "prod", "all"],
+        help="environments that receive the plaintext password (default: all)",
+    )
+    rotate_collector.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the new password from stdin instead of generating one",
+    )
+    check_collector = secrets_sub.add_parser(
+        "check-collector-password",
+        help="Verify the collector password against the monitoring hash",
+    )
+    check_collector.add_argument(
+        "environment",
+        nargs="?",
+        default="all",
+        choices=["stage", "prod", "all"],
+    )
     backup = sub.add_parser("backup", help="Manage encrypted Production backups")
     backup_sub = backup.add_subparsers(dest="backup_command", required=True)
     for action in ("setup", "run", "list"):
@@ -324,8 +357,38 @@ def _secret_text_fragments(value: str) -> set[str]:
     return fragments
 
 
+def _verify_collector_password(repo: Path, config: EnvironmentConfig, *, verbose: bool) -> None:
+    """Reject a collector deployment nginx would answer with a silent 401.
+
+    The plaintext password and its crypt hash live in two files, so only comparing them
+    proves the push credentials agree. Projects without a monitoring environment of their
+    own have nothing to compare against, and a missing Docker must not block a deployment
+    that is about to fail on Docker anyway.
+    """
+    if not (repo / ".deploy/environments/monitoring/config.yml").is_file():
+        return
+    try:
+        mismatched = collector_password_mismatches(repo, [config.environment], verbose=verbose)
+    except RunnerError:
+        print(
+            "[WARN] unable to verify the collector password against the monitoring hash",
+            file=sys.stderr,
+        )
+        return
+    if mismatched:
+        raise ConfigurationError(
+            f"Collector password for {config.environment} does not match "
+            f"LOKI_PUSH_PASSWORD_HASH; run: {ROTATE_HINT}"
+        )
+
+
 def _load_and_validate(
-    repo: Path, environment: str, command: str, *, action: str | None = None
+    repo: Path,
+    environment: str,
+    command: str,
+    *,
+    action: str | None = None,
+    verbose: bool = False,
 ) -> tuple[GlobalConfig, EnvironmentConfig | MonitoringConfig]:
     global_config, config = load_configuration(repo, environment)
     if environment == "prod" and isinstance(config, EnvironmentConfig):
@@ -347,6 +410,7 @@ def _load_and_validate(
         validate_local_inputs(config, require_public_key=False, require_application=False)
         if action != "status":
             validate_observability_inputs(config)
+            _verify_collector_password(repo, config, verbose=verbose)
     elif command == "status":
         if not isinstance(config, EnvironmentConfig):
             raise ConfigurationError("Application status requires stage or prod")
@@ -393,6 +457,17 @@ def run(argv: list[str] | None = None) -> int:
                 return initialize_secret_store(project_dir, args.environment)
             if args.secrets_command == "hash-password":
                 return hash_password(project_dir, verbose=args.verbose)
+            if args.secrets_command == "rotate-collector-password":
+                return rotate_collector_password(
+                    project_dir,
+                    args.environment,
+                    password_stdin=args.password_stdin,
+                    verbose=args.verbose,
+                )
+            if args.secrets_command == "check-collector-password":
+                return check_collector_password(
+                    project_dir, args.environment, verbose=args.verbose
+                )
             if args.new_project_id:
                 create_project_id(project_dir)
             print(external_secret_root(project_dir))
@@ -557,7 +632,11 @@ def run(argv: list[str] | None = None) -> int:
         environments = all_environments if environment == "all" else [environment]
         loaded = [
             _load_and_validate(
-                project_dir, name, args.command, action=getattr(args, "action", None)
+                project_dir,
+                name,
+                args.command,
+                action=getattr(args, "action", None),
+                verbose=args.verbose,
             )
             for name in environments
         ]

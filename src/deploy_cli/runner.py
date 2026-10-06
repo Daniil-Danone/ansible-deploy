@@ -207,7 +207,14 @@ class AnsibleRunner:
             )
 
     def openssl_password_hash(self, password: str) -> str:
-        """Compute a crypt SHA-512 hash inside the runtime container, never in argv."""
+        """Compute a crypt SHA-512 hash inside the runtime container, never in argv.
+
+        The password reaches stdin as bytes on purpose. In text mode Python rewrites the
+        trailing newline to the platform separator, so on Windows openssl receives CRLF,
+        strips only the LF and hashes the password with a trailing CR. Nothing else can
+        reproduce that hash: nginx answers every push with 401 while the local check,
+        hashing the same way, reports a match.
+        """
         container_name = self._container_name()
         args = [
             "docker",
@@ -228,11 +235,8 @@ class AnsibleRunner:
             result = subprocess.run(  # noqa: S603 - fixed executable and argument vector
                 args,
                 cwd=self.repo,
-                input=password + "\n",
+                input=(password + "\n").encode("utf-8"),
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 check=False,
                 timeout=60,
             )
@@ -244,9 +248,10 @@ class AnsibleRunner:
         finally:
             if not completed:
                 self._cleanup_container(container_name)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
         if result.returncode != 0 or len(lines) != 1 or not lines[0].startswith("$6$"):
-            detail = self.redactor(result.stderr.strip())
+            detail = self.redactor(result.stderr.decode("utf-8", errors="replace").strip())
             raise RunnerError(
                 f"Password hashing failed: {detail or 'no crypt SHA-512 hash returned'}", 5
             )
@@ -278,11 +283,8 @@ class AnsibleRunner:
             result = subprocess.run(  # noqa: S603 - fixed executable and argument vector
                 args,
                 cwd=self.repo,
-                input=password + "\n",
+                input=(password + "\n").encode("utf-8"),
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 check=False,
                 timeout=60,
             )
@@ -294,9 +296,10 @@ class AnsibleRunner:
         finally:
             if not completed:
                 self._cleanup_container(container_name)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
         if result.returncode != 0 or len(lines) != 1 or not lines[0].startswith("$6$"):
-            detail = self.redactor(result.stderr.strip())
+            detail = self.redactor(result.stderr.decode("utf-8", errors="replace").strip())
             raise RunnerError(
                 f"Password hashing failed: {detail or 'no crypt SHA-512 hash returned'}", 5
             )

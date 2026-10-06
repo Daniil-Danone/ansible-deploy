@@ -47,6 +47,8 @@ def _template_files() -> dict[Path, bytes]:
 
     def collect(current: Any, relative: Path) -> None:
         for child in current.iterdir():
+            if child.name == "__pycache__" or child.name.endswith((".pyc", ".pyo")):
+                continue
             child_relative = relative / child.name
             if child.is_dir():
                 collect(child, child_relative)

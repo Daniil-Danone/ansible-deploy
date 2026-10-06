@@ -1,16 +1,34 @@
 # GitHub Actions CI/CD
 
 Репозиторий CLI предоставляет reusable contract
-`.github/workflows/reusable-deploy.yml`; application repository копирует и адаптирует
-`.github/examples/application-deploy.yml`.
+`.github/workflows/reusable-deploy.yml`. `project init` создаёт в application repository
+управляемый caller `.github/workflows/deploy.yml` и настройки `.deploy/cd.yml`:
+
+```bash
+ansible-deploy project init --stage-branch develop --production-branch main --tool-sha FULL_40_CHARACTER_SHA
+```
+
+Ветки по умолчанию — `develop` для Stage и `main` для Production. Обе можно выбрать
+при init. При смене веток или версии CLI измените `stage_branch`, `production_branch`
+или `tool_sha` в `.deploy/cd.yml` и выполните `project sync`: он обновит workflow,
+сохранив настройки и комментарии config. Ручные изменения самого workflow сохраняются
+по обычному conflict contract: новая версия появляется как `deploy.yml.deploy-new`.
+Без `--tool-sha` init оставляет безопасный `TOOL_FULL_SHA` placeholder; перед запуском
+его обязательно заменяют в `.deploy/cd.yml` на проверенный полный commit SHA через sync.
+GitHub не запускает reusable workflow с несуществующим placeholder ref.
+
+`.github/examples/application-deploy.yml` показывает вариант с Python quality checks.
+Сгенерированный caller использует repository variable `QUALITY_COMMAND` для команд
+проверки конкретного приложения; если она пуста, дополнительные проверки пропускаются.
 
 ## Границы pipeline
 
 | Событие | Разрешённая работа |
 |---|---|
 | Pull request | только quality/test, без build/push, deploy и environment secrets |
-| Push в `develop` | quality, matrix build/push всех application images, затем Stage и HTTPS health |
-| Manual dispatch | quality, matrix build/push, Stage, затем Production после approval |
+| Push в выбранную Stage-ветку | quality, matrix build/push всех application images, monitoring, Stage и HTTPS health |
+| Manual dispatch из выбранной Production-ветки с `deploy_production=true` | quality, matrix build/push, monitoring, Production после approval |
+| Dispatch из другой ветки или без `deploy_production` | только quality, без build/push и deploy |
 
 Production job привязан к GitHub Environment `production`. Именно required reviewers
 этого Environment являются approval boundary; `workflow_dispatch` сам по себе approval
@@ -19,16 +37,17 @@ Production job привязан к GitHub Environment `production`. Именно
 
 ## Настроить вручную
 
-1. Создайте Environments `build`, `stage` и `production`.
+1. Создайте Environments `build`, `monitoring`, `stage` и `production`.
 2. Для `production` включите required reviewers и запрет self-review, если доступно.
 3. В `build` создайте secrets `REGISTRY_USERNAME` и `REGISTRY_TOKEN` с минимальными
-   правами на push только в application image repositories. В example workflow замените
-   `REGISTRY_HOST` и `REGISTRY_PREFIX`; имена repositories берутся из `image` каждого
-   service в `.deploy/images.yml`.
+   правами на push только в application image repositories. Задайте repository variables
+   `REGISTRY_PREFIX` (например, `ghcr.io/owner`), `REGISTRY_HOST` (по умолчанию `ghcr.io`),
+   `STAGE_HEALTH_URL`, `PRODUCTION_HEALTH_URL` и `QUALITY_COMMAND`. Имена repositories
+   берутся из `image` каждого service в `.deploy/images.yml`.
 4. В `stage` и `production` создайте secret `ANSIBLE_DEPLOY_SECRET_STORE_JSON`. Reusable
    job читает его после входа в соответствующий Environment; caller не передаёт этот
    secret через `workflow_call`.
-5. В `stage` и `production` создайте `CLI_REPOSITORY_TOKEN`: fine-grained token с
+5. В `monitoring`, `stage` и `production` создайте `CLI_REPOSITORY_TOKEN`: fine-grained token с
    единственным доступом `Contents: read` к приватному `ansible-deploy`. Если политика
    требует GitHub App, адаптируйте workflow для выпуска короткоживущего installation
    token из защищённых App ID/private-key secrets и передайте результат в те же
@@ -39,12 +58,16 @@ Production job привязан к GitHub Environment `production`. Именно
 6. В настройках приватного `ansible-deploy` разрешите application repository вызывать
    reusable workflows: **Settings → Actions → General → Access**. Не открывайте доступ
    организации шире необходимого.
-7. Замените оба `TOOL_FULL_SHA` в caller workflow на один проверенный 40-символьный
-   commit SHA `ansible-deploy`, не на branch/tag.
+7. Задайте `tool_sha` в `.deploy/cd.yml` как проверенный 40-символьный commit SHA
+   `ansible-deploy`, затем запустите `project sync`; branch/tag не принимаются.
+   GitHub требует наличия workflow в default branch для кнопки ручного запуска:
+   сначала добавьте scaffold в default branch, затем выбирайте Production-ветку в Run workflow.
 8. Заполните **все** собираемые services в `.deploy/images.yml`, замените health URLs и
-   команды quality приложения. `deploy project sync` должен установить управляемый
+   `QUALITY_COMMAND` приложения. `deploy project sync` должен установить управляемый
    helper `.deploy/ci_image_contract.py`; не копируйте его вручную из случайной версии.
-9. Защитите `develop`: required quality check, review и запрет прямого push.
+9. Защитите выбранные Stage/Production-ветки: required quality check, review и запрет
+   прямого push. В Environment `production` ограничьте deployment branches выбранной
+   Production-веткой; проверка ветки caller дополняет это ограничение.
 10. Все внешние Actions закреплены полными commit SHA. Обновляйте SHA и комментарий
     версии вместе, только после review соответствующего upstream release; mutable
     `@vN`, branch и tag в рабочих workflow запрещены.
@@ -78,8 +101,26 @@ immutable reference — секреты в них не записываются �
 `collect_images` требует ровно один результат для каждого service: отсутствующий,
 лишний, повторный, относящийся к другому SHA/repository или невалидный digest блокирует
 deploy. Только после этого формируется единый JSON `service -> repository@sha256:digest`.
-Stage получает эту полную map. Production зависит от успешного Stage и получает
-**буквально тот же job output**, не пересобирая images.
+Stage или Production получают полную map для выбранного SHA. Production запускается
+из своей ветки и не деплоит её commit в Stage; image map собирается и проверяется один
+раз в рамках этого ручного запуска.
+
+## Monitoring в CD
+
+Перед каждым application deploy reusable workflow выполняет `monitoring deploy` в
+GitHub Environment `monitoring`. Эта команда проверяет managed SSH access, при первом
+запуске bootstrap-ит незанятый monitoring сервер, а на повторных полностью reconciles
+сервер, monitoring Compose/config и проверяет health. Таким образом, обновления CLI
+и monitoring-конфига применяются при очередном CD без отдельного ручного update.
+SSH fingerprints должны быть предварительно подтверждены через `trust monitoring`;
+первичная автоматическая установка требует key-based bootstrap access.
+
+В `monitoring` создайте свой `ANSIBLE_DEPLOY_SECRET_STORE_JSON` с monitoring secret,
+private/public SSH keys по путям из `.deploy/environments/monitoring/config.yml`.
+Credentials мониторинга не нужно дублировать в app Environments. Все обновления общего
+monitoring сервера сериализованы в одной concurrency group независимо от app target;
+ошибка monitoring блокирует application deploy. Environment `production` по-прежнему
+требует approval перед получением app secrets и деплоем Production.
 
 Reusable workflow повторно валидирует SHA/map, checkout-ит application SHA и через тот
 же helper требует точного совпадения service set с `.deploy/images.yml`. Во временном
@@ -94,7 +135,9 @@ pipeline до deploy.
 - PR запускает только quality и не получает build/deploy jobs или environment secrets;
 - сломанный quality блокирует Stage/Production;
 - matrix содержит все services из `.deploy/images.yml`, каждый tag соответствует полному SHA;
-- Stage применяет полный image map, Production применяет тот же map после успешного Stage;
+- Stage автоматически запускается только для своей ветки; Production доступен только
+  вручную из своей ветки, а неверный dispatch не запускает image build/deploy;
+- monitoring reconciles до application deploy и получает только свои environment secrets;
 - Production находится в `Waiting` до reviewer approval;
 - два запуска одного environment не исполняют deploy параллельно;
 - cleanup step выполняется после искусственно сломанного deploy;

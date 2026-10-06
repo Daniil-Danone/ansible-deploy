@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 from dataclasses import dataclass
 from importlib import metadata
 from importlib.resources import files
@@ -12,8 +14,10 @@ import yaml
 
 from .secret_store import create_project_id, load_project_id
 
-SCAFFOLD_VERSION = 2
+SCAFFOLD_VERSION = 3
 STATE_PATH = Path(".deploy/template-state.yml")
+CD_PATH = Path(".deploy/cd.yml")
+WORKFLOW_PATH = Path(".github/workflows/deploy.yml")
 
 
 class ProjectError(RuntimeError):
@@ -52,6 +56,80 @@ def _template_files() -> dict[Path, bytes]:
     collect(root, Path())
     if not result:
         raise ProjectError("Packaged project scaffold is empty")
+    return result
+
+
+def _validate_branch(value: Any, field: str) -> str:
+    # Literal Git branch names only: GitHub push filters must not become globs.
+    if (
+        not isinstance(value, str)
+        or not value
+        or value == "@"
+        or value.startswith(("-", "/"))
+        or value.endswith(("/", "."))
+        or any(part.startswith(".") or part.endswith(".lock") for part in value.split("/"))
+        or any(token in value for token in ("..", "//", "@{"))
+        or re.search(r"[\x00-\x20\x7f~^:?*+!\[\]\\]", value)
+    ):
+        raise ProjectError(
+            f"CD {field} must be a valid Git branch name without GitHub filter metacharacters"
+        )
+    return value
+
+
+def _cd_templates(
+    project_dir: Path,
+    templates: dict[Path, bytes],
+    *,
+    stage_branch: str | None,
+    production_branch: str | None,
+    tool_sha: str | None,
+) -> dict[Path, bytes]:
+    path = project_dir / CD_PATH
+    settings: Any = yaml.safe_load(templates[CD_PATH])
+    if path.exists():
+        if path.is_symlink() or not path.is_file():
+            raise ProjectError(f"Refusing unsafe CD configuration: {CD_PATH.as_posix()}")
+        try:
+            settings = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise ProjectError("Unable to read .deploy/cd.yml") from exc
+    if not isinstance(settings, dict) or settings.get("schema_version") != 1:
+        raise ProjectError("Unsupported .deploy/cd.yml schema")
+    for name, override in (
+        ("stage_branch", stage_branch),
+        ("production_branch", production_branch),
+        ("tool_sha", tool_sha),
+    ):
+        if override is not None:
+            if path.exists() and settings.get(name) != override:
+                raise ProjectError(f"Edit {name} in .deploy/cd.yml and run project sync")
+            settings[name] = override
+    stage = _validate_branch(settings.get("stage_branch"), "stage_branch")
+    production = _validate_branch(settings.get("production_branch"), "production_branch")
+    sha = settings.get("tool_sha")
+    if not isinstance(sha, str) or (
+        sha != "TOOL_FULL_SHA" and re.fullmatch(r"[0-9a-f]{40}", sha) is None
+    ):
+        raise ProjectError("CD tool_sha must be a full lowercase Git SHA")
+    if tool_sha == "TOOL_FULL_SHA":
+        raise ProjectError("--tool-sha must be a full lowercase Git SHA")
+    result = dict(templates)
+    if path.exists():
+        # CD settings are project-owned; only the rendered workflow is upgraded.
+        result[CD_PATH] = path.read_bytes()
+    else:
+        result[CD_PATH] = yaml.safe_dump(settings, sort_keys=False).encode()
+    workflow = result[WORKFLOW_PATH].decode("utf-8")
+    replacements = {
+        "__STAGE_BRANCH_YAML__": json.dumps(stage),
+        "__STAGE_REF_EXPRESSION__": "'refs/heads/" + stage.replace("'", "''") + "'",
+        "__PRODUCTION_REF_EXPRESSION__": "'refs/heads/" + production.replace("'", "''") + "'",
+        "__TOOL_SHA__": sha,
+    }
+    for placeholder, value in replacements.items():
+        workflow = workflow.replace(placeholder, value)
+    result[WORKFLOW_PATH] = workflow.encode()
     return result
 
 
@@ -112,10 +190,24 @@ def _replace(path: Path, content: bytes) -> None:
         raise
 
 
-def sync_project(project_dir: Path, *, check: bool = False) -> ProjectSyncResult:
+def sync_project(
+    project_dir: Path,
+    *,
+    check: bool = False,
+    stage_branch: str | None = None,
+    production_branch: str | None = None,
+    tool_sha: str | None = None,
+) -> ProjectSyncResult:
     project_dir = project_dir.resolve()
     if not project_dir.is_dir():
         raise ProjectError(f"Project directory does not exist: {project_dir}")
+    templates = _cd_templates(
+        project_dir,
+        _template_files(),
+        stage_branch=stage_branch,
+        production_branch=production_branch,
+        tool_sha=tool_sha,
+    )
     identity = project_dir / ".deploy/project-id"
     identity_missing = not identity.exists()
     if identity.exists():
@@ -123,7 +215,6 @@ def sync_project(project_dir: Path, *, check: bool = False) -> ProjectSyncResult
     elif not check:
         identity.parent.mkdir(parents=True, exist_ok=True)
         create_project_id(project_dir)
-    templates = _template_files()
     previous_hashes, previous_version = _load_state(project_dir)
     if previous_version > SCAFFOLD_VERSION:
         raise ProjectError("Project scaffold is newer than this CLI; upgrade ansible-deploy")

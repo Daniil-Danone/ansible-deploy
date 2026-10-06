@@ -27,6 +27,7 @@ def test_reusable_deploy_has_protected_serial_environment_contract() -> None:
     assert "workflow_call" in workflow["on"]
     assert workflow["permissions"] == {"contents": "read", "packages": "read"}
     assert deploy["environment"] == "${{ inputs.environment }}"
+    assert deploy["needs"] == "monitoring"
     assert deploy["concurrency"]["cancel-in-progress"] == "false"
     assert deploy["timeout-minutes"] == "45"
     assert "env" not in deploy
@@ -90,18 +91,45 @@ def test_release_workflow_publishes_only_version_matching_tags() -> None:
     assert "dist/*.whl dist/*.tar.gz" in steps[order[-1]]
 
 
+def test_monitoring_reconciles_before_application_in_its_own_protected_environment() -> None:
+    workflow = _workflow(ROOT / ".github/workflows/reusable-deploy.yml")
+    monitoring = workflow["jobs"]["monitoring"]
+    steps = monitoring["steps"]
+
+    assert monitoring["environment"] == "monitoring"
+    assert monitoring["concurrency"]["group"] == "monitoring-${{ github.repository }}"
+    assert monitoring["concurrency"]["cancel-in-progress"] == "false"
+    assert workflow["jobs"]["deploy"]["needs"] == "monitoring"
+    reconcile = next(step for step in steps if "monitoring deploy" in step.get("run", ""))
+    assert reconcile["run"] == "ansible-deploy --project-dir . monitoring deploy"
+    assert steps[-1]["if"] == "always()"
+    checkout = next(step for step in steps if step.get("name") == (
+        "Check out deployment CLI at immutable SHA"
+    ))
+    assert checkout["with"]["ref"] == "${{ inputs.tool_sha }}"
+    materialize = next(step for step in steps if step.get("name") == (
+        "Materialize temporary external secret store"
+    ))
+    assert materialize["env"]["DEPLOY_SECRET_STORE_JSON"] == (
+        "${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}"  # noqa: S105 - expression
+    )
+
+
 def test_application_caller_keeps_pr_quality_only_and_gates_deployments() -> None:
     workflow = _workflow(ROOT / ".github/examples/application-deploy.yml")
     jobs = workflow["jobs"]
 
     assert "pull_request" in workflow["on"]
-    assert jobs["image_plan"]["if"] == "github.event_name != 'pull_request'"
+    assert "github.event_name == 'push'" in jobs["image_plan"]["if"]
+    assert "github.ref == 'refs/heads/main'" in jobs["image_plan"]["if"]
     assert "pull_request" not in jobs["stage"]["if"]
     assert jobs["image_plan"]["needs"] == "quality"
     assert jobs["build_images"]["needs"] == "image_plan"
     assert jobs["collect_images"]["needs"] == ["image_plan", "build_images"]
     assert jobs["stage"]["needs"] == ["quality", "collect_images"]
-    assert jobs["production"]["needs"] == ["quality", "collect_images", "stage"]
+    assert jobs["production"]["needs"] == ["quality", "collect_images"]
+    assert "github.ref == 'refs/heads/main'" in jobs["production"]["if"]
+    assert "workflow_dispatch" not in jobs["stage"]["if"]
     assert jobs["stage"]["with"]["environment"] == "stage"
     assert jobs["production"]["with"]["environment"] == "production"
     assert jobs["stage"]["with"]["deployment_sha"] == (

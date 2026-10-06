@@ -37,10 +37,10 @@ loki.process "docker_level" {
 		}
 	}
 
-	stage.logfmt {
-		mapping = {
-			level = "level",
-		}
+	// A regex, not the logfmt stage: that one logs an error for every plain-text
+	// line (uvicorn, nginx access logs), flooding the collector's own stream.
+	stage.regex {
+		expression = "(?:^|\\s)level=\"?(?P<level>[A-Za-z]+)"
 	}
 
 	stage.template {

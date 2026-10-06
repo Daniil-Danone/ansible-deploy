@@ -548,3 +548,67 @@ def test_observability_secret_is_file_mounted_without_content_in_argv_or_env(
     assert f"{secret}:/run/secrets/observability:ro" in command
     assert secret_value not in command
     assert secret_value not in environments[0].values()
+
+
+def test_password_hashing_sends_bytes_so_windows_cannot_append_a_carriage_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Text mode rewrites the trailing newline to the platform separator. openssl then
+    # strips only the LF and hashes the password with a trailing CR, so nginx rejects
+    # every push while the local check, hashing the same way, reports a match.
+    digest = "$6$" + "a" * 16 + "$" + "b" * 86
+    captured: dict[str, object] = {}
+
+    def _capture(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured.update(kwargs)
+        captured["args"] = args
+        return subprocess.CompletedProcess(args, 0, digest.encode("utf-8"), b"")
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    runner = AnsibleRunner(tmp_path, Redactor([]))
+
+    assert runner.openssl_password_hash("pa55word") == digest
+
+    payload = captured["input"]
+    assert isinstance(payload, bytes)
+    assert payload == b"pa55word\n"
+    assert b"\r" not in payload
+    assert not captured.get("text")
+    assert "encoding" not in captured
+
+
+def test_password_hashing_with_a_known_salt_sends_the_same_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    salt = "Iv.vlN5Sd8vM/DMe"
+    digest = f"$6${salt}$" + "b" * 86
+    captured: dict[str, object] = {}
+
+    def _capture(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured.update(kwargs)
+        captured["args"] = args
+        return subprocess.CompletedProcess(args, 0, digest.encode("utf-8"), b"")
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    runner = AnsibleRunner(tmp_path, Redactor([]))
+
+    assert runner.openssl_password_hash_with_salt("pa55word", salt) == digest
+
+    assert captured["input"] == b"pa55word\n"
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert args[-3:] == ["-salt", salt, "-stdin"]
+
+
+def test_password_hashing_reports_a_failure_from_binary_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, b"", b"openssl exploded"),
+    )
+    runner = AnsibleRunner(tmp_path, Redactor([]))
+
+    with pytest.raises(RunnerError, match="openssl exploded"):
+        runner.openssl_password_hash("pa55word")

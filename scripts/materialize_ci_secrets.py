@@ -10,6 +10,9 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 def main() -> None:
+    # This is a one-shot helper process. A restrictive umask also covers
+    # intermediate directories implicitly created by mkdir(parents=True).
+    os.umask(0o077)
     root_value = os.environ.get("ANSIBLE_DEPLOY_SECRETS_DIR", "")
     payload = os.environ.pop("DEPLOY_SECRET_STORE_JSON", "")
     if not root_value or not Path(root_value).is_absolute() or not payload:

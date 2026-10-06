@@ -44,19 +44,25 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Require a higher package version than the base branch
+      - name: Require a higher package version than the PR base commit
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          set -euo pipefail
+          if [ "${#BASE_SHA}" -ne 40 ] || ! printf '%s\n' "$BASE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Invalid PR base commit SHA"
+            exit 1
+          fi
+          if ! git cat-file -e "$BASE_SHA^{commit}"; then
+            echo "::error::PR base commit $BASE_SHA is unavailable"
+            exit 1
+          fi
           read_version() {
-            grep '^__version__' "$1" | cut -d'"' -f2
+            grep '^__version__' | cut -d'"' -f2
           }
-          # fetch-depth: 0 above already fetched every branch, and the checkout
-          # drops its credentials, so read the base branch from the local remote
-          # ref instead of fetching it again.
-          git show "origin/$BASE_REF:src/deploy_cli/__init__.py" > /tmp/base_init.py
-          base="$(read_version /tmp/base_init.py)"
-          head="$(read_version src/deploy_cli/__init__.py)"
+          # Compare against the event snapshot even if the base branch has advanced.
+          base="$(git show "$BASE_SHA:src/deploy_cli/__init__.py" | read_version)"
+          head="$(read_version < src/deploy_cli/__init__.py)"
           echo "base=$base head=$head"
           if [ "$base" = "$head" ]; then
             echo "::error::Package version is still $head; raise deploy_cli.__version__"
@@ -64,7 +70,7 @@ jobs:
           fi
           higher="$( { echo "$base"; echo "$head"; } | sort -V | tail -n1 )"
           if [ "$higher" != "$head" ]; then
-            echo "::error::Version $head is lower than $base on $BASE_REF"
+            echo "::error::Version $head is lower than $base at PR base commit $BASE_SHA"
             exit 1
           fi
 

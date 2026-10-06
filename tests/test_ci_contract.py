@@ -2,10 +2,12 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parents[1]
@@ -18,6 +20,102 @@ def _workflow(path: Path) -> dict:
     )
     assert isinstance(loaded, dict)
     return loaded
+
+
+def _version_bump_step() -> dict:
+    job = _workflow(ROOT / ".github/workflows/checks.yml")["jobs"]["version-bump"]
+    return next(step for step in job["steps"] if "run" in step)
+
+
+def test_version_bump_compares_against_immutable_pr_base_commit() -> None:
+    job = _workflow(ROOT / ".github/workflows/checks.yml")["jobs"]["version-bump"]
+    checkout, step = job["steps"]
+
+    assert job["if"] == "github.event_name == 'pull_request'"
+    assert checkout["with"]["fetch-depth"] == "0"
+    assert step["env"] == {"BASE_SHA": "${{ github.event.pull_request.base.sha }}"}
+    assert 'git cat-file -e "$BASE_SHA^{commit}"' in step["run"]
+    assert 'git show "$BASE_SHA:src/deploy_cli/__init__.py"' in step["run"]
+    assert "BASE_REF" not in step["run"]
+    assert "origin/" not in step["run"]
+
+
+def _bash() -> str:
+    if os.name == "nt":
+        git = shutil.which("git")
+        if git:
+            git_bash = Path(git).parents[1] / "usr/bin/bash.exe"
+            if git_bash.is_file():
+                return str(git_bash)
+    elif bash := shutil.which("bash"):
+        return bash
+    pytest.skip("Bash is required to execute the workflow version gate")
+
+
+def _run_version_gate(root: Path, base_sha: str) -> subprocess.CompletedProcess[str]:
+    bash = _bash()
+    environment = os.environ.copy()
+    environment["BASE_SHA"] = base_sha
+    if os.name == "nt":
+        # Use Git Bash coreutils (not Windows sort.exe, which has no -V option).
+        environment["PATH"] = str(Path(bash).parent) + os.pathsep + environment["PATH"]
+    return subprocess.run(  # noqa: S603 - actual repository workflow, fixed shell invocation
+        [bash, "-c", _version_bump_step()["run"]],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_version_bump_keeps_event_base_when_remote_branch_advances(tmp_path: Path) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("Git is required to simulate an advancing base branch")
+
+    def run_git(*args: str) -> str:
+        return subprocess.run(  # noqa: S603 - fixed Git operations on a temporary repository
+            [git, *args], cwd=tmp_path, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    run_git("init")
+    run_git("config", "user.email", "ci-contract@example.invalid")
+    run_git("config", "user.name", "CI Contract Test")
+    run_git("config", "commit.gpgsign", "false")
+    version_file = tmp_path / "src/deploy_cli/__init__.py"
+    version_file.parent.mkdir(parents=True)
+    version_file.write_text('__version__ = "0.5.0"\n', encoding="utf-8")
+    run_git("add", ".")
+    run_git("commit", "-m", "base version")
+    base_sha = run_git("rev-parse", "HEAD")
+    version_file.write_text('__version__ = "0.5.1"\n', encoding="utf-8")
+    run_git("commit", "-am", "head version")
+    head_sha = run_git("rev-parse", "HEAD")
+    run_git("update-ref", "refs/remotes/origin/develop", head_sha)
+
+    assert run_git("show", "origin/develop:src/deploy_cli/__init__.py") == (
+        '__version__ = "0.5.1"'
+    )
+    result = _run_version_gate(tmp_path, base_sha)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "base=0.5.0 head=0.5.1" in result.stdout
+    assert _run_version_gate(tmp_path, head_sha).returncode != 0
+    version_file.write_text('__version__ = "0.4.9"\n', encoding="utf-8")
+    assert _run_version_gate(tmp_path, base_sha).returncode != 0
+
+
+@pytest.mark.parametrize("base_sha", ["", "develop", "a" * 39, "A" * 40, "a" * 40 + "\nextra"])
+def test_version_bump_rejects_invalid_base_sha(tmp_path: Path, base_sha: str) -> None:
+    result = _run_version_gate(tmp_path, base_sha)
+    assert result.returncode != 0
+    assert "Invalid PR base commit SHA" in result.stdout
+
+
+def test_version_bump_rejects_unavailable_base_commit(tmp_path: Path) -> None:
+    result = _run_version_gate(tmp_path, "a" * 40)
+    assert result.returncode != 0
+    assert "PR base commit " + "a" * 40 + " is unavailable" in result.stdout
 
 
 def test_reusable_deploy_has_protected_serial_environment_contract() -> None:

@@ -109,6 +109,11 @@ loki.relabel "journal" {
 loki.source.journal "system" {
 	// Empty path intentionally lets Alloy discover both /run/log/journal and
 	// /var/log/journal, which are mounted read-only into the container.
+	//
+	// The journal relabel rules run after these base labels and overwrite
+	// "service" with the systemd unit name (ssh.service, docker.service), which
+	// is the useful granularity in the dashboard. The "service" value below is
+	// therefore only a fallback for entries without _SYSTEMD_UNIT (kernel, audit).
 	relabel_rules = loki.relabel.journal.rules
 	labels        = {
 		environment = "{{ app_environment }}",

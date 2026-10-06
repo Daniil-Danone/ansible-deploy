@@ -13,3 +13,48 @@
         that:
           - alloy_container.exists
           - alloy_container.container.State.Status == 'running'
+    # A running container proves nothing about delivery: Alloy retries a rejected
+    # push forever, so a credential drift against the Loki gateway looks healthy.
+    - name: Read collector push credentials from the managed secret file
+      ansible.builtin.slurp:
+        path: "{{ collector_dir }}/push.password"
+      register: collector_push_secret
+      no_log: true
+      when: not ansible_check_mode
+    - name: Probe authenticated Loki push with the collector credentials
+      ansible.builtin.uri:
+        url: "{{ collector_push_url }}"
+        method: POST
+        url_username: "{{ collector_username }}"
+        url_password: "{{ collector_push_secret.content | b64decode | trim }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          streams:
+            - stream:
+                environment: "{{ app_environment }}"
+                # Deliberately distinct from production labels so probes stay
+                # visible on their own and never pollute the dashboard series.
+                service: ansible-deploy-probe
+              values:
+                - ["{{ (now(utc=True).timestamp() | int) }}000000000", "collector status probe"]
+        status_code: 204
+      register: collector_push_probe
+      failed_when: false
+      no_log: true
+      when: not ansible_check_mode
+    - name: Require Loki to accept the collector push credentials
+      ansible.builtin.assert:
+        that:
+          - collector_push_probe.status == 204
+        fail_msg: >-
+          {{
+          'Collector push authentication failed (HTTP 401); run:
+          deploy secrets check-collector-password'
+          if collector_push_probe.status == 401
+          else 'Collector push probe failed (HTTP '
+          ~ collector_push_probe.status
+          ~ '); check the Loki gateway, network reachability and push body limits'
+          }}
+        quiet: true
+      when: not ansible_check_mode

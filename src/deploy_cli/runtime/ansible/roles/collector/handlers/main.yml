@@ -1,0 +1,12 @@
+---
+- name: Restart Alloy collector
+  community.docker.docker_compose_v2:
+    project_src: "{{ collector_dir }}"
+    files: [compose.yml]
+    project_name: "ansible_deploy_collector_{{ app_environment }}"
+    state: restarted
+  # Alloy reads config.alloy and the bind-mounted password only at process start,
+  # so a changed file on disk is invisible until the container is recreated.
+  # Check mode skips the reconciliation block, so there is nothing to restart.
+  when: not ansible_check_mode
+  no_log: true

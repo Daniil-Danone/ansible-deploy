@@ -16,6 +16,7 @@ deploy secrets init [<stage|prod|monitoring|restore|all>]
 deploy secrets hash-password
 deploy secrets rotate-collector-password [--environment <stage|prod|all>] [--password-stdin]
 deploy secrets check-collector-password [<stage|prod|all>]
+deploy secrets github upload --repo OWNER/REPO [--environment <stage|prod|monitoring> ...] [--check]
 deploy trust <stage|prod|monitoring|restore> [--print] [--force]
 deploy images publish <stage|prod> ...
 deploy stage [--dry-run] [--version SHA] [--allow-volume-change NAME ...]
@@ -75,6 +76,38 @@ backup останавливаются до обращения к серверу 
 ключа у уже доверенного окружения — код `3`.
 
 ## Внешние секреты
+
+`secrets github upload --repo OWNER/REPO` загружает `ANSIBLE_DEPLOY_SECRET_STORE_JSON`
+в GitHub Environments `stage`, `production` и `monitoring` из конфигов текущего проекта.
+Аргумент `--repo` обязателен: укажите именно свой форк, автоматического выбора по Git
+remote нет. Нужен установленный GitHub CLI (`gh`) с авторизацией через `gh auth login`
+и правами на управление environment secrets. Environments должны уже существовать.
+Цель всегда `github.com`; `GH_HOST`, default host и Git remotes её не меняют. Для входа
+на нужный host используйте `gh auth login --hostname github.com`. Preflight проверяет
+только активный аккаунт этого host, поэтому неактивный просроченный аккаунт не мешает.
+
+По умолчанию обрабатываются `stage`, `prod` и `monitoring`; CLI `prod` соответствует
+GitHub Environment `production`. Чтобы выбрать часть окружений, повторите option:
+
+```bash
+ansible-deploy secrets github upload --repo OWNER/REPO --environment stage --environment monitoring
+ansible-deploy secrets github upload --repo OWNER/REPO --check
+```
+
+`--check` проверяет локальные файлы, права, размер JSON (максимум 48 KiB), авторизацию
+`gh` и доступ к указанному repository, без загрузки. Он не проверяет существование
+Environments и права на запись secrets. Все выбранные наборы проходят локальную
+проверку до первой загрузки; при сетевой ошибке уже загруженные наборы сохраняются,
+поэтому повторите команду после устранения причины. Повторная загрузка заменяет
+значение этого secret в каждом выбранном Environment.
+
+CLI собирает только SSH private/public keys, application env и `extra_env_files`,
+настроенные registry credentials и collector password; для monitoring — его keys и
+`monitoring.secrets_file`. Backup/restore secrets не загружаются. JSON с base64 исходных
+байтов передаётся `gh` только через stdin; содержимое не выводится и не сохраняется в
+промежуточные файлы. Отчёт показывает только Environment, количество файлов и статус.
+Токены `CLI_REPOSITORY_TOKEN`, registry publisher credentials и repository variables
+настраиваются отдельно — см. [CI/CD guide](../guides/ci-cd.md).
 
 `secrets path` печатает project-scoped root. `secrets init [<environment>|all]`
 (по умолчанию `all`) создаёт в нём owner-only `environments/<env>/`, `keys/`, `backup/` и

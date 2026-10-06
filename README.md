@@ -32,6 +32,13 @@ CLI ставится глобально через [uv](https://docs.astral.sh/u
 создавайте только во внешнем каталоге, который печатает `ansible-deploy secrets path`.
 `.deploy/` целиком предназначен для commit-safe конфигурации.
 
+Для CD создайте GitHub Environments, выполните `gh auth login --hostname github.com`
+и из каталога приложения
+загрузите deployment secrets одной командой:
+`ansible-deploy secrets github upload --repo OWNER/REPO`. Проверка перед загрузкой —
+та же команда с `--check`; остальные GitHub settings описаны в
+[руководстве CI/CD](docs/guides/ci-cd.md).
+
 Полная последовательность с Production, Monitoring, backup и диагностикой:
 [канонический runbook](docs/runbook.md). Для установки инструментов выберите только
 свою ОС: [Windows](docs/getting-started/windows.md),

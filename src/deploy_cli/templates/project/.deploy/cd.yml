@@ -1,0 +1,6 @@
+---
+schema_version: 1
+stage_branch: develop
+production_branch: main
+# Pin the CLI and reusable workflow to the same reviewed immutable commit.
+tool_sha: TOOL_FULL_SHA

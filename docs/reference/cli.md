@@ -9,7 +9,7 @@ deploy [--project-dir PATH] [--verbose] COMMAND ...
 Основные команды:
 
 ```text
-deploy project init
+deploy project init [--stage-branch BRANCH] [--production-branch BRANCH] [--tool-sha SHA]
 deploy project sync [--check]
 deploy secrets path [--new-project-id]
 deploy secrets init [<stage|prod|monitoring|restore|all>]
@@ -34,6 +34,15 @@ deploy backup restore prod --target restore --backup ID [--yes]
 `project sync --check` не меняет файлы, но печатает план `[CREATE]`/`[UPDATE]`, conflict
 или `[OK]`; он возвращает ненулевой код при pending update или conflict. Обычный sync
 никогда не перезаписывает изменённый config/Compose.
+
+`project init` создаёт также `.github/workflows/deploy.yml`: push в Stage-ветку
+автоматически деплоит Stage, Production запускается вручную только из Production-ветки.
+Defaults — `develop` и `main`. Выбор хранится в `.deploy/cd.yml`; после изменения
+настроек `project sync` обновляет управляемый workflow, сохраняя локальные ветки.
+`--tool-sha` принимает только полный 40-символьный lowercase SHA CLI. Без него остаётся
+placeholder, который нужно заполнить перед первым запуском CD. Оставшуюся настройку
+Environments, secrets, registry, health URLs и quality checks описывает
+[CI/CD guide](../guides/ci-cd.md).
 
 `--dry-run` применяет Ansible check mode там, где он безопасен, и не выполняет
 bootstrap с password. Production-changing commands требуют интерактивного `prod`; в

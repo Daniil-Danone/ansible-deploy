@@ -120,7 +120,8 @@ def test_rotate_keeps_the_rest_of_the_monitoring_file_byte_for_byte(
     assert cli.run(["--project-dir", str(project), "secrets", "rotate-collector-password"]) == 0
 
     before = _MONITORING_ENV.splitlines(keepends=True)
-    after = monitoring.read_text(encoding="utf-8", newline="").splitlines(keepends=True)
+    # Path.read_text(newline=...) needs Python 3.13; decode the bytes instead.
+    after = monitoring.read_bytes().decode("utf-8").splitlines(keepends=True)
     assert len(after) == len(before)
     changed = [index for index, line in enumerate(after) if line != before[index]]
     assert len(changed) == 1

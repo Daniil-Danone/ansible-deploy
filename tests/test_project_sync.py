@@ -18,6 +18,15 @@ def _generated_workflow(project: Path) -> dict:
     )
 
 
+def _assert_deployment_secret_contract(workflow: dict) -> None:
+    expected = {
+        name: "${{ secrets." + name + " }}"
+        for name in ("CLI_REPOSITORY_TOKEN", "ANSIBLE_DEPLOY_SECRET_STORE_JSON")
+    }
+    for name in ("stage", "production"):
+        assert workflow["jobs"][name]["secrets"] == expected
+
+
 def test_init_generates_cd_with_default_branch_and_event_boundaries(tmp_path: Path) -> None:
     assert cli.run(["--project-dir", str(tmp_path), "project", "init"]) == 0
     workflow = _generated_workflow(tmp_path)
@@ -36,6 +45,7 @@ def test_init_generates_cd_with_default_branch_and_event_boundaries(tmp_path: Pa
     assert "github.event_name == 'push'" in jobs["image_plan"]["if"]
     assert "github.ref == 'refs/heads/main'" in jobs["image_plan"]["if"]
     assert "workflow_dispatch" in workflow["on"]
+    _assert_deployment_secret_contract(workflow)
 
 
 def test_custom_init_branches_and_immutable_pin_survive_workflow_upgrade(
@@ -65,6 +75,34 @@ def test_custom_init_branches_and_immutable_pin_survive_workflow_upgrade(
     for name in ("stage", "production"):
         assert workflow["jobs"][name]["uses"].endswith("@" + sha)
         assert workflow["jobs"][name]["with"]["tool_sha"] == sha
+    assert not sync_project(tmp_path, check=True).changes_required
+    _assert_deployment_secret_contract(workflow)
+
+
+def test_sync_upgrades_previous_caller_without_secret_mapping(tmp_path: Path) -> None:
+    sync_project(tmp_path, stage_branch="test/danone-servers", tool_sha="a" * 40)
+    path = tmp_path / WORKFLOW_PATH
+    previous = path.read_text(encoding="utf-8").replace(
+        "    secrets:\n"
+        "      CLI_REPOSITORY_TOKEN: ${{ secrets.CLI_REPOSITORY_TOKEN }}\n"
+        "      ANSIBLE_DEPLOY_SECRET_STORE_JSON: ${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}\n",
+        "",
+    )
+    path.write_text(previous, encoding="utf-8")
+    state_path = tmp_path / STATE_PATH
+    state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+    state["files"][WORKFLOW_PATH.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    state_path.write_text(yaml.safe_dump(state), encoding="utf-8")
+
+    assert WORKFLOW_PATH in sync_project(tmp_path, check=True).updated
+    result = sync_project(tmp_path)
+
+    assert not result.conflicts
+    assert WORKFLOW_PATH in result.updated
+    workflow = _generated_workflow(tmp_path)
+    _assert_deployment_secret_contract(workflow)
+    assert workflow["on"]["push"]["branches"] == ["test/danone-servers"]
+    assert workflow["jobs"]["stage"]["with"]["tool_sha"] == "a" * 40
     assert not sync_project(tmp_path, check=True).changes_required
 
 
@@ -321,3 +359,4 @@ def test_wheel_contains_scaffold_and_init_works_outside_checkout(
     assert (application / ".deploy/environments/prod/config.yml").is_file()
     assert (application / WORKFLOW_PATH).is_file()
     assert (application / CD_PATH).is_file()
+    _assert_deployment_secret_contract(_generated_workflow(application))

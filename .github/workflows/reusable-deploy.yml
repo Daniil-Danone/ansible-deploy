@@ -24,6 +24,13 @@ on:
         description: Complete JSON service-to-immutable-image map from the build gate
         required: true
         type: string
+    secrets:
+      CLI_REPOSITORY_TOKEN:
+        description: Private CLI read token; the called job Environment supplies or overrides it
+        required: false
+      ANSIBLE_DEPLOY_SECRET_STORE_JSON:
+        description: External secret store JSON; the called job Environment supplies or overrides it
+        required: false
 permissions:
   contents: read
   packages: read
@@ -51,6 +58,7 @@ jobs:
           HEALTH_URL: ${{ inputs.health_url }}
           IMAGE_MAP: ${{ inputs.image_map }}
           CLI_REPOSITORY_TOKEN: ${{ secrets.CLI_REPOSITORY_TOKEN }}
+          ANSIBLE_DEPLOY_SECRET_STORE_JSON: ${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}
         run: |
           python - <<'PY'
           import os
@@ -58,6 +66,13 @@ jobs:
           import re
           from urllib.parse import urlsplit
 
+          missing = []
+          if not os.environ["CLI_REPOSITORY_TOKEN"]:
+              missing.append("CLI_REPOSITORY_TOKEN is required for the private CLI checkout")
+          if not os.environ["ANSIBLE_DEPLOY_SECRET_STORE_JSON"]:
+              missing.append("ANSIBLE_DEPLOY_SECRET_STORE_JSON is required for the external secret store")
+          if missing:
+              raise SystemExit("\n".join(missing))
           for name in ("DEPLOYMENT_SHA", "TOOL_SHA"):
               if re.fullmatch(r"[0-9a-f]{40}", os.environ[name]) is None:
                   raise SystemExit(f"{name} must be a full lowercase Git SHA")
@@ -78,8 +93,6 @@ jobs:
                   reference,
               ) is None:
                   raise SystemExit("IMAGE_MAP contains a non-immutable reference")
-          if not os.environ["CLI_REPOSITORY_TOKEN"]:
-              raise SystemExit("CLI_REPOSITORY_TOKEN is required for the private CLI checkout")
           PY
       - name: Check out application at immutable SHA
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -135,6 +148,7 @@ jobs:
           HEALTH_URL: ${{ inputs.health_url }}
           IMAGE_MAP: ${{ inputs.image_map }}
           CLI_REPOSITORY_TOKEN: ${{ secrets.CLI_REPOSITORY_TOKEN }}
+          ANSIBLE_DEPLOY_SECRET_STORE_JSON: ${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}
         run: |
           python - <<'PY'
           import os
@@ -142,6 +156,13 @@ jobs:
           import re
           from urllib.parse import urlsplit
 
+          missing = []
+          if not os.environ["CLI_REPOSITORY_TOKEN"]:
+              missing.append("CLI_REPOSITORY_TOKEN is required for the private CLI checkout")
+          if not os.environ["ANSIBLE_DEPLOY_SECRET_STORE_JSON"]:
+              missing.append("ANSIBLE_DEPLOY_SECRET_STORE_JSON is required for the external secret store")
+          if missing:
+              raise SystemExit("\n".join(missing))
           for name in ("DEPLOYMENT_SHA", "TOOL_SHA"):
               if re.fullmatch(r"[0-9a-f]{40}", os.environ[name]) is None:
                   raise SystemExit(f"{name} must be a full lowercase Git SHA")
@@ -162,8 +183,6 @@ jobs:
                   reference,
               ) is None:
                   raise SystemExit("IMAGE_MAP contains a non-immutable reference")
-          if not os.environ["CLI_REPOSITORY_TOKEN"]:
-              raise SystemExit("CLI_REPOSITORY_TOKEN is required for the private CLI checkout")
           PY
       - name: Check out application at immutable SHA
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1

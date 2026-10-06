@@ -197,6 +197,9 @@ jobs:
       tool_sha: __TOOL_SHA__
       health_url: ${{ vars.STAGE_HEALTH_URL }}
       image_map: ${{ needs.collect_images.outputs.image_map }}
+    secrets:
+      CLI_REPOSITORY_TOKEN: ${{ secrets.CLI_REPOSITORY_TOKEN }}
+      ANSIBLE_DEPLOY_SECRET_STORE_JSON: ${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}
 
   production:
     if: >-
@@ -213,3 +216,6 @@ jobs:
       tool_sha: __TOOL_SHA__
       health_url: ${{ vars.PRODUCTION_HEALTH_URL }}
       image_map: ${{ needs.collect_images.outputs.image_map }}
+    secrets:
+      CLI_REPOSITORY_TOKEN: ${{ secrets.CLI_REPOSITORY_TOKEN }}
+      ANSIBLE_DEPLOY_SECRET_STORE_JSON: ${{ secrets.ANSIBLE_DEPLOY_SECRET_STORE_JSON }}

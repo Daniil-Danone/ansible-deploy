@@ -170,6 +170,77 @@ def test_reusable_deploy_has_protected_serial_environment_contract() -> None:
     assert ".deploy/ci_image_contract.py apply" in apply["run"]
 
 
+def test_reusable_deploy_declares_optional_environment_secret_contract() -> None:
+    workflow = _workflow(ROOT / ".github/workflows/reusable-deploy.yml")
+    secrets = workflow["on"]["workflow_call"]["secrets"]
+
+    assert set(secrets) == {"CLI_REPOSITORY_TOKEN", "ANSIBLE_DEPLOY_SECRET_STORE_JSON"}
+    for declaration in secrets.values():
+        assert declaration["required"] == "false"
+        assert "Environment" in declaration["description"]
+
+
+@pytest.mark.parametrize("relative", [
+    ".github/examples/application-deploy.yml",
+    "src/deploy_cli/templates/project/.github/workflows/deploy.yml",
+])
+def test_callers_pass_only_declared_deployment_secrets(relative: str) -> None:
+    workflow = _workflow(ROOT / relative)
+    expected = {
+        name: "${{ secrets." + name + " }}"
+        for name in ("CLI_REPOSITORY_TOKEN", "ANSIBLE_DEPLOY_SECRET_STORE_JSON")
+    }
+
+    for name in ("stage", "production"):
+        job = workflow["jobs"][name]
+        assert job["secrets"] == expected
+        assert "environment" not in job
+        assert job["with"]["environment"] == name
+    assert "secrets: inherit" not in (ROOT / relative).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("job_name", ["monitoring", "deploy"])
+@pytest.mark.parametrize("token_present,store_present", [
+    (False, False), (False, True), (True, False), (True, True),
+])
+def test_called_jobs_validate_both_secrets_before_checkout_without_leaking_values(
+    job_name: str, token_present: bool, store_present: bool,
+) -> None:
+    job = _workflow(ROOT / ".github/workflows/reusable-deploy.yml")["jobs"][job_name]
+    steps = job["steps"]
+    validation = next(step for step in steps if step.get("name") == "Validate immutable inputs")
+    for name in ("CLI_REPOSITORY_TOKEN", "ANSIBLE_DEPLOY_SECRET_STORE_JSON"):
+        assert validation["env"][name] == "${{ secrets." + name + " }}"
+    checkout_indices = [i for i, step in enumerate(steps) if "uses" in step]
+    assert steps.index(validation) < min(checkout_indices)
+    code = validation["run"].removeprefix("python - <<'PY'\n").removesuffix("PY\n")
+    environment = os.environ.copy()
+    environment.update({
+        "DEPLOYMENT_SHA": "a" * 40,
+        "TOOL_SHA": "b" * 40,
+        "HEALTH_URL": "https://stage.example.invalid/health",
+        "IMAGE_MAP": json.dumps({"web": "ghcr.io/owner/web@sha256:" + "c" * 64}),
+        "CLI_REPOSITORY_TOKEN": "synthetic-cli-token" if token_present else "",
+        "ANSIBLE_DEPLOY_SECRET_STORE_JSON": "synthetic-secret-store" if store_present else "",
+    })
+    result = subprocess.run(  # noqa: S603 - fixed interpreter and repository validation script
+        [sys.executable, "-c", code], env=environment, capture_output=True, text=True,
+        check=False,
+    )
+    expected_errors = []
+    if not token_present:
+        expected_errors.append("CLI_REPOSITORY_TOKEN is required for the private CLI checkout")
+    if not store_present:
+        expected_errors.append(
+            "ANSIBLE_DEPLOY_SECRET_STORE_JSON is required for the external secret store"
+        )
+    assert (result.returncode == 0) == (not expected_errors)
+    assert result.stdout == ""
+    assert result.stderr == "\n".join(expected_errors) + ("\n" if expected_errors else "")
+    assert "synthetic-cli-token" not in result.stdout + result.stderr
+    assert "synthetic-secret-store" not in result.stdout + result.stderr
+
+
 def test_release_workflow_publishes_only_version_matching_tags() -> None:
     workflow = _workflow(ROOT / ".github/workflows/release.yml")
     release = workflow["jobs"]["release"]

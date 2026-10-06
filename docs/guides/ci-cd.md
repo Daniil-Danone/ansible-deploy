@@ -49,8 +49,9 @@ Production job привязан к GitHub Environment `production`. Именно
    загрузите external secret store командой `ansible-deploy secrets github upload
    --repo OWNER/REPO` (подробности ниже). Она создаст/обновит
    `ANSIBLE_DEPLOY_SECRET_STORE_JSON` в `stage`, `production` и `monitoring`. Reusable
-   job читает его после входа в соответствующий Environment; caller не передаёт этот
-   secret через `workflow_call`.
+   job читает его после входа в соответствующий Environment. Caller явно передаёт
+   только `CLI_REPOSITORY_TOKEN` и `ANSIBLE_DEPLOY_SECRET_STORE_JSON` через контракт
+   `workflow_call.secrets`; `secrets: inherit` не используется.
 5. В `monitoring`, `stage` и `production` создайте `CLI_REPOSITORY_TOKEN`: fine-grained token с
    единственным доступом `Contents: read` к приватному `ansible-deploy`. Если политика
    требует GitHub App, адаптируйте workflow для выпуска короткоживущего installation
@@ -77,6 +78,31 @@ Production job привязан к GitHub Environment `production`. Именно
     `@vN`, branch и tag в рабочих workflow запрещены.
 
 ## Загрузка external secret store
+
+### Контракт secrets и GitHub Environments
+
+Reusable workflow объявляет оба deployment secrets с `required: false` намеренно:
+caller job с `uses` ещё не привязан к Environment и может передать пустое значение.
+GitHub разрешает environment secrets позже, когда запускает called job с
+`environment: monitoring` или `environment: ${{ inputs.environment }}` и выполняет
+его protection rules. Одноимённый secret этого Environment имеет приоритет над
+переданным caller значением. Оба значения обязательны для выполнения deployment:
+первый validation step проверяет их уже внутри called job до checkout и
+материализации store. Сообщения об отсутствующих secrets содержат только их имена.
+Это позволяет хранить отдельный JSON в каждом Environment без repository-level
+дублирования Production credentials.
+
+Если validation сообщает, что secret отсутствует, хотя `gh secret list --env ...`
+показывает его имя, проверьте failing job: `stage / Reconcile monitoring` использует
+Environment `monitoring`, а `stage / Deploy stage` — `stage`. Проверьте оба имени
+secrets именно в Environment failing job и в caller repository. Затем проверьте,
+что `tool_sha` закреплён на версии с `workflow_call.secrets`, а в обоих caller jobs
+есть явный `secrets` mapping. После обновления CLI измените `tool_sha` в `.deploy/cd.yml`,
+выполните `project sync` и закоммитьте обновлённый workflow. Повторный запуск старого
+run использует старую версию workflow; для исправления нужен новый запуск нового
+commit. Значения secrets в логах не проверяйте и в repository secrets не копируйте.
+
+### Команда загрузки
 
 Environments должны уже существовать. У авторизованного в `gh` аккаунта должны быть
 права на управление их secrets. В терминале application project выполните:

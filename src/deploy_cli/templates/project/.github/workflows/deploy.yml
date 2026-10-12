@@ -28,13 +28,15 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "22"
       - name: Run application quality checks
-        env:
-          QUALITY_COMMAND: ${{ vars.QUALITY_COMMAND }}
-        run: |
-          if [ -n "$QUALITY_COMMAND" ]; then
-            bash -e -o pipefail -c "$QUALITY_COMMAND"
-          fi
+        run: bash .deploy/ci.sh
 
   image_plan:
     if: >-

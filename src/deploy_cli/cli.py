@@ -552,7 +552,11 @@ def run(argv: list[str] | None = None) -> int:
                 global_config, source = load_configuration(project_dir, "prod")
                 if not isinstance(source, EnvironmentConfig):
                     raise ConfigurationError("Production environment configuration is required")
-                validate_backup_inputs(source, require_identity=args.backup_command == "restore")
+                validate_backup_inputs(
+                    source,
+                    require_identity=args.backup_command == "restore",
+                    allow_disabled=args.backup_command == "setup",
+                )
                 backup_config = source.backup
                 if backup_config is None:
                     raise ConfigurationError("Production backup is not configured")
@@ -599,10 +603,15 @@ def run(argv: list[str] | None = None) -> int:
                             active.server.bootstrap_user, active.server.host
                         )
                         backup_secret_values.add(backup_bootstrap_password)
-                for field, path in (
-                    ("backup credentials", backup_config.credentials_file),
-                    ("age identity", backup_config.age_identity_file),
-                ):
+                secret_inputs = (
+                    ()
+                    if args.backup_command == "setup" and not backup_config.enabled
+                    else (
+                        ("backup credentials", backup_config.credentials_file),
+                        ("age identity", backup_config.age_identity_file),
+                    )
+                )
+                for field, path in secret_inputs:
                     backup_secret_values.add(str(path))
                     if field == "age identity" and args.backup_command != "restore":
                         continue

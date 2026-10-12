@@ -13,7 +13,7 @@
       - rclone
     state: present
     update_cache: true
-  when: backup_action in ['setup', 'run', 'list', 'restore']
+  when: backup_action in ['run', 'list', 'restore'] or (backup_action == 'setup' and backup_enabled)
 
 - name: Create protected backup directories
   ansible.builtin.file:
@@ -33,7 +33,7 @@
     owner: root
     group: root
     mode: "0700"
-  when: backup_action in ['setup', 'run', 'list', 'restore']
+  when: backup_action in ['run', 'list', 'restore'] or (backup_action == 'setup' and backup_enabled)
 
 - name: Install protected rclone configuration
   ansible.builtin.copy:
@@ -43,7 +43,7 @@
     group: root
     mode: "0600"
   no_log: true
-  when: backup_action in ['setup', 'run', 'list', 'restore']
+  when: backup_action in ['run', 'list'] or (backup_action == 'setup' and backup_enabled)
 
 - name: Install non-secret backup configuration
   ansible.builtin.copy:
@@ -52,7 +52,7 @@
     group: root
     mode: "0600"
     content: "{{ backup_runtime_config | to_nice_json }}\n"
-  when: backup_action in ['setup', 'run', 'list', 'restore']
+  when: backup_action in ['run', 'list', 'restore'] or (backup_action == 'setup' and backup_enabled)
 
 - name: Install scheduled backup service
   ansible.builtin.copy:
@@ -76,7 +76,7 @@
       PrivateTmp=true
       ProtectHome=true
   register: backup_service
-  when: backup_action == 'setup'
+  when: backup_action == 'setup' and backup_enabled
 
 - name: Install scheduled backup timer
   ansible.builtin.copy:
@@ -94,7 +94,7 @@
       [Install]
       WantedBy=timers.target
   register: backup_timer
-  when: backup_action == 'setup'
+  when: backup_action == 'setup' and backup_enabled
 
 - name: Enable scheduled backup timer
   ansible.builtin.systemd_service:
@@ -102,7 +102,24 @@
     enabled: true
     state: started
     daemon_reload: "{{ backup_service.changed or backup_timer.changed }}"
-  when: backup_action == 'setup'
+  when: backup_action == 'setup' and backup_enabled
+
+- name: Inspect scheduled backup timer
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ansible-deploy-backup.timer
+  register: backup_installed_timer
+  when: backup_action == 'setup' and not backup_enabled
+
+- name: Disable scheduled backup timer
+  ansible.builtin.systemd_service:
+    name: ansible-deploy-backup.timer
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when:
+    - backup_action == 'setup'
+    - not backup_enabled
+    - backup_installed_timer.stat.exists
 
 - name: Run requested backup operation
   ansible.builtin.command:
@@ -121,6 +138,15 @@
 - name: Restore encrypted backup with ephemeral identity
   when: backup_action == 'restore'
   block:
+    - name: Stage rclone configuration in tmpfs
+      ansible.builtin.copy:
+        src: /run/secrets/backup_credentials
+        dest: /run/ansible-deploy-rclone.conf
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
     - name: Stage age identity in tmpfs
       ansible.builtin.copy:
         src: /run/secrets/age_identity
@@ -144,6 +170,11 @@
       ansible.builtin.debug:
         var: backup_restore_result.stdout
   always:
+    - name: Remove ephemeral rclone configuration
+      ansible.builtin.file:
+        path: /run/ansible-deploy-rclone.conf
+        state: absent
+
     - name: Remove ephemeral age identity
       ansible.builtin.file:
         path: /run/ansible-deploy-age-identity

@@ -15,7 +15,11 @@ import yaml
 from pydantic import ValidationError
 
 from deploy_cli.cli import run as cli_run
-from deploy_cli.config import ConfigurationError, validate_restore_isolation
+from deploy_cli.config import (
+    ConfigurationError,
+    validate_backup_inputs,
+    validate_restore_isolation,
+)
 from deploy_cli.models import BackupConfig, BackupRetention, EnvironmentConfig
 
 
@@ -265,6 +269,17 @@ def test_source_environment_is_required_only_for_restore() -> None:
         EnvironmentConfig.model_validate(stage)
 
 
+def test_disabled_backup_is_allowed_only_for_setup_validation() -> None:
+    config = SimpleNamespace(
+        environment="prod",
+        backup=SimpleNamespace(enabled=False),
+    )
+
+    validate_backup_inputs(config, allow_disabled=True)
+    with pytest.raises(ConfigurationError, match="not enabled"):
+        validate_backup_inputs(config)
+
+
 def test_runtime_retention_rejects_all_zero_and_protects_current(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -348,6 +363,102 @@ def test_restore_file_preserves_mode_mtime_and_is_writable(tmp_path: Path) -> No
         stream.write("!")
     assert target.read_text(encoding="utf-8") == "payload!"
 
+
+def test_restore_destination_replacement_rolls_back_all_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _runtime()
+    restore_root = tmp_path / "restore"
+    staged_root = restore_root / ".transaction/payload"
+    rollback_root = restore_root / ".transaction/rollback"
+    for root in (restore_root, staged_root, rollback_root):
+        root.mkdir(parents=True, exist_ok=True)
+    for name, content in (("first.txt", "old first"), ("second.txt", "old second")):
+        (restore_root / name).write_text(content, encoding="utf-8")
+        (staged_root / name).write_text(content.replace("old", "new"), encoding="utf-8")
+    source_map = {
+        "a" * 32: {
+            "id": "a" * 32,
+            "type": "file",
+            "restore_destination": "first.txt",
+        },
+        "b" * 32: {
+            "id": "b" * 32,
+            "type": "file",
+            "restore_destination": "second.txt",
+        },
+    }
+    real_replace = runtime.os.replace
+
+    def fail_second_install(source: Path, target: Path) -> None:
+        if Path(source) == staged_root / "second.txt":
+            raise OSError("simulated rename failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(runtime.os, "replace", fail_second_install)
+
+    with pytest.raises(OSError, match="simulated rename failure"):
+        runtime._replace_restore_destinations(
+            {"restore_root": str(restore_root)},
+            source_map,
+            staged_root,
+            rollback_root,
+        )
+
+    assert (restore_root / "first.txt").read_text(encoding="utf-8") == "old first"
+    assert (restore_root / "second.txt").read_text(encoding="utf-8") == "old second"
+
+
+def test_failed_rollback_preserves_recovery_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _runtime()
+    restore_root = tmp_path / "restore"
+    restore_root.mkdir()
+    target = restore_root / "data.txt"
+    target.write_text("old payload", encoding="utf-8")
+    source_id = "a" * 32
+    source_map = {
+        source_id: {
+            "id": source_id,
+            "type": "file",
+            "restore_destination": "data.txt",
+        }
+    }
+    real_replace = runtime.os.replace
+    transaction_root: Path | None = None
+
+    with pytest.raises(
+        runtime.BackupFailure, match="recovery data is preserved at"
+    ):
+        with runtime._restore_transaction(restore_root) as current_transaction:
+            transaction_root = current_transaction
+            staged_root = transaction_root / "payload"
+            rollback_root = transaction_root / "rollback"
+            staged_root.mkdir()
+            rollback_root.mkdir()
+            staged = staged_root / "data.txt"
+            backup = rollback_root / source_id
+            staged.write_text("new payload", encoding="utf-8")
+
+            def fail_install_and_rollback(source: Path, destination: Path) -> None:
+                if Path(source) in {staged, backup}:
+                    raise OSError("simulated rename failure")
+                real_replace(source, destination)
+
+            monkeypatch.setattr(runtime.os, "replace", fail_install_and_rollback)
+            runtime._replace_restore_destinations(
+                {"restore_root": str(restore_root)},
+                source_map,
+                staged_root,
+                rollback_root,
+            )
+
+    assert transaction_root is not None
+    assert transaction_root.is_dir()
+    assert (transaction_root / "rollback" / source_id).read_text(
+        encoding="utf-8"
+    ) == "old payload"
 
 def test_remote_list_requires_valid_manifest_and_complete_set(
     monkeypatch: pytest.MonkeyPatch,
@@ -750,8 +861,12 @@ def test_backup_with_fake_age_and_rclone_is_verified_and_idempotent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     runtime = _runtime()
-    source = tmp_path / "source.txt"
-    source.write_text("payload", encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "current.txt").write_text("payload", encoding="utf-8")
+    glob_source = tmp_path / "glob-source"
+    glob_source.mkdir()
+    (glob_source / "matched.txt").write_text("glob payload", encoding="utf-8")
     remote = tmp_path / "remote"
     remote.mkdir()
 
@@ -788,10 +903,15 @@ def test_backup_with_fake_age_and_rclone_is_verified_and_idempotent(
         "compose_file": "/unused",
         "include": [
             {
-                "type": "file",
+                "type": "directory",
                 "path": str(source),
-                "restore_destination": "restored.txt",
-            }
+                "restore_destination": "restored",
+            },
+            {
+                "type": "glob",
+                "path": str(glob_source / "*.txt"),
+                "restore_destination": "glob-restored",
+            },
         ],
         "remote": "drive:backups",
         "result_file": str(tmp_path / "last-result.json"),
@@ -803,3 +923,41 @@ def test_backup_with_fake_age_and_rclone_is_verified_and_idempotent(
 
     assert first["status"] == second["status"] == "ok"
     assert any(path.name.endswith(".tar.gz.age") for path in remote.iterdir())
+
+    restore_root = tmp_path / "restore"
+    destination = restore_root / "restored"
+    destination.mkdir(parents=True)
+    stale = destination / "stale.txt"
+    stale.write_text("obsolete", encoding="utf-8")
+    glob_destination = restore_root / "glob-restored"
+    glob_destination.mkdir()
+    stale_glob = glob_destination / "stale.txt"
+    stale_glob.write_text("obsolete", encoding="utf-8")
+    config.update(
+        {
+            "age_identity": str(tmp_path / "age.key"),
+            "rclone_config": str(tmp_path / "rclone.conf"),
+            "restore_root": str(restore_root),
+        }
+    )
+
+    restore_file = runtime._restore_file
+    monkeypatch.setattr(
+        runtime,
+        "_restore_file",
+        lambda archive, member, target: (_ for _ in ()).throw(
+            runtime.BackupFailure("simulated extraction failure")
+        ),
+    )
+    with pytest.raises(runtime.BackupFailure, match="simulated extraction failure"):
+        runtime.restore(config, second["backup_id"])
+    assert stale.read_text(encoding="utf-8") == "obsolete"
+    assert stale_glob.read_text(encoding="utf-8") == "obsolete"
+    monkeypatch.setattr(runtime, "_restore_file", restore_file)
+
+    runtime.restore(config, second["backup_id"])
+
+    assert not stale.exists()
+    assert (destination / "current.txt").read_text(encoding="utf-8") == "payload"
+    assert not stale_glob.exists()
+    assert (glob_destination / "matched.txt").read_text(encoding="utf-8") == "glob payload"

@@ -11,6 +11,7 @@
 ## Эксплуатация
 
 - [Backup, Restore Drill и disaster recovery](guides/backup-restore.md)
+- [Настройка backup и Restore Drill для uwords (Эмиль)](guides/deployment-emil-backup.md)
 - [GitHub Actions CI/CD](guides/ci-cd.md)
 - [Обновление CLI и project sync](guides/upgrading.md)
 - [Production](guides/production.md)

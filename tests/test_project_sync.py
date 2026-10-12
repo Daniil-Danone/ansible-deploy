@@ -8,12 +8,26 @@ import yaml
 from deploy_cli import cli
 from deploy_cli.config import load_configuration
 from deploy_cli.models import EnvironmentConfig
-from deploy_cli.project import CD_PATH, SCAFFOLD_VERSION, STATE_PATH, WORKFLOW_PATH, sync_project
+from deploy_cli.project import (
+    CD_PATH,
+    CI_WORKFLOW_PATH,
+    SCAFFOLD_VERSION,
+    STATE_PATH,
+    WORKFLOW_PATH,
+    sync_project,
+)
 
 
 def _generated_workflow(project: Path) -> dict:
     return yaml.load(
         (project / WORKFLOW_PATH).read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,  # noqa: S506 - strings and collections only
+    )
+
+
+def _generated_ci_workflow(project: Path) -> dict:
+    return yaml.load(
+        (project / CI_WORKFLOW_PATH).read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,  # noqa: S506 - strings and collections only
     )
 
@@ -25,6 +39,17 @@ def _assert_deployment_secret_contract(workflow: dict) -> None:
     }
     for name in ("stage", "production"):
         assert workflow["jobs"][name]["secrets"] == expected
+
+
+def _assert_quality_toolchain(workflow: dict) -> None:
+    steps = workflow["jobs"]["quality"]["steps"]
+    java = next(step for step in steps if step.get("uses", "").startswith("actions/setup-java@"))
+    node = next(step for step in steps if step.get("uses", "").startswith("actions/setup-node@"))
+
+    assert steps.index(java) < steps.index(node) < len(steps) - 1
+    assert java["with"] == {"distribution": "temurin", "java-version": "21"}
+    assert node["with"] == {"node-version": "22"}
+    assert steps[-1]["run"] == "bash .deploy/ci.sh"
 
 
 def test_init_generates_cd_with_default_branch_and_event_boundaries(tmp_path: Path) -> None:
@@ -46,6 +71,56 @@ def test_init_generates_cd_with_default_branch_and_event_boundaries(tmp_path: Pa
     assert "github.ref == 'refs/heads/main'" in jobs["image_plan"]["if"]
     assert "workflow_dispatch" in workflow["on"]
     _assert_deployment_secret_contract(workflow)
+
+
+def test_init_generates_fail_closed_repo_owned_ci_for_both_branches(tmp_path: Path) -> None:
+    assert cli.run(["--project-dir", str(tmp_path), "project", "init"]) == 0
+
+    ci = _generated_ci_workflow(tmp_path)
+    entrypoint = (tmp_path / ".deploy/ci.sh").read_text(encoding="utf-8")
+    delivery = _generated_workflow(tmp_path)
+
+    assert ci["on"]["pull_request"]["branches"] == ["main", "develop"]
+    assert ci["on"]["push"]["branches"] == ["main", "develop"]
+    assert ci["permissions"] == {"contents": "read"}
+    assert ci["jobs"]["quality"]["timeout-minutes"] == "20"
+    _assert_quality_toolchain(ci)
+    _assert_quality_toolchain(delivery)
+    assert "QUALITY_COMMAND" not in (tmp_path / WORKFLOW_PATH).read_text(encoding="utf-8")
+    assert "exit 1" in entrypoint
+    assert "CI is not configured" in entrypoint
+
+
+def test_custom_branches_render_in_standalone_ci(tmp_path: Path) -> None:
+    sync_project(tmp_path, stage_branch="release/stage", production_branch="release/prod")
+
+    ci = _generated_ci_workflow(tmp_path)
+    assert ci["on"]["pull_request"]["branches"] == ["release/prod", "release/stage"]
+    assert ci["on"]["push"]["branches"] == ["release/prod", "release/stage"]
+
+
+def test_project_owned_ci_commands_are_preserved_and_upgrade_conflicts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from deploy_cli import project
+
+    sync_project(tmp_path)
+    entrypoint = tmp_path / ".deploy/ci.sh"
+    configured = b"#!/usr/bin/env bash\nset -euo pipefail\nmake test\n"
+    entrypoint.write_bytes(configured)
+
+    assert not sync_project(tmp_path).changes_required
+    assert entrypoint.read_bytes() == configured
+
+    templates = project._template_files()
+    templates[Path(".deploy/ci.sh")] += b"# scaffold upgrade\n"
+    monkeypatch.setattr(project, "_template_files", lambda: templates)
+
+    result = sync_project(tmp_path)
+    candidate = entrypoint.with_name("ci.sh.deploy-new")
+    assert entrypoint.read_bytes() == configured
+    assert candidate.read_bytes() == templates[Path(".deploy/ci.sh")]
+    assert result.conflicts == ((Path(".deploy/ci.sh"), Path(".deploy/ci.sh.deploy-new")),)
 
 
 def test_custom_init_branches_and_immutable_pin_survive_workflow_upgrade(
@@ -188,6 +263,8 @@ def test_init_is_idempotent_and_creates_all_environment_skeletons(tmp_path: Path
     for environment in ("stage", "prod", "monitoring", "restore"):
         assert (tmp_path / f".deploy/environments/{environment}/config.yml").is_file()
     assert (tmp_path / ".deploy/ci_image_contract.py").is_file()
+    assert (tmp_path / ".deploy/ci.sh").is_file()
+    assert (tmp_path / CI_WORKFLOW_PATH).is_file()
 
 
 def test_generated_scaffold_loads_every_environment_and_has_complete_disabled_backup(
@@ -358,5 +435,7 @@ def test_wheel_contains_scaffold_and_init_works_outside_checkout(
     assert result.returncode == 0, result.stderr
     assert (application / ".deploy/environments/prod/config.yml").is_file()
     assert (application / WORKFLOW_PATH).is_file()
+    assert (application / CI_WORKFLOW_PATH).is_file()
     assert (application / CD_PATH).is_file()
+    assert (application / ".deploy/ci.sh").is_file()
     _assert_deployment_secret_contract(_generated_workflow(application))

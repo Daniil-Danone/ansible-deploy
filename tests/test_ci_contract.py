@@ -363,6 +363,8 @@ def test_workflows_pin_every_third_party_action_to_full_sha() -> None:
         ".github/workflows/release.yml",
         ".github/workflows/reusable-deploy.yml",
         ".github/examples/application-deploy.yml",
+        "src/deploy_cli/templates/project/.github/workflows/ci.yml",
+        "src/deploy_cli/templates/project/.github/workflows/deploy.yml",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         third_party_lines = [

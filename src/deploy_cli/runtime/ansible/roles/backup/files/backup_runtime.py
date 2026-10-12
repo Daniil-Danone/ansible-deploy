@@ -37,6 +37,10 @@ class BackupFailure(RuntimeError):
     pass
 
 
+class RestoreRecoveryFailure(BackupFailure):
+    pass
+
+
 def run(command: list[str], *, stdin: Path | None = None, stdout: Path | None = None) -> str:
     input_stream = stdin.open("rb") if stdin else None
     output_stream = stdout.open("wb") if stdout else subprocess.PIPE
@@ -620,7 +624,7 @@ def _safe_destination(root: Path, relative: PurePosixPath) -> Path:
         metadata = current.lstat()
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise BackupFailure("restore destination contains an unsafe path component")
-    if target.exists():
+    if target.exists() or target.is_symlink():
         metadata = target.lstat()
         if stat.S_ISLNK(metadata.st_mode):
             raise BackupFailure("restore destination is a symlink")
@@ -629,6 +633,73 @@ def _safe_destination(root: Path, relative: PurePosixPath) -> Path:
         if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
             raise BackupFailure("restore destination is not a regular file or directory")
     return target
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def _replace_restore_destinations(
+    config: dict[str, Any],
+    source_map: dict[str, dict[str, Any]],
+    staged_root: Path,
+    rollback_root: Path,
+) -> None:
+    restore_root = Path(config["restore_root"])
+    replaced: list[tuple[Path, Path | None, bool]] = []
+    try:
+        for source_id, source in source_map.items():
+            if source["type"] == "postgres":
+                continue
+            relative = PurePosixPath(source["restore_destination"])
+            staged = _safe_destination(staged_root, relative)
+            target = _safe_destination(restore_root, relative)
+            if not staged.exists():
+                raise BackupFailure("staged restore destination is missing")
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            target = _safe_destination(target.parent, PurePosixPath(target.name))
+            backup = rollback_root / source_id if target.exists() else None
+            if backup is not None:
+                os.replace(target, backup)
+            replaced.append((target, backup, False))
+            os.replace(staged, target)
+            replaced[-1] = (target, backup, True)
+    except BaseException:
+        rollback_error: OSError | None = None
+        for target, backup, installed in reversed(replaced):
+            try:
+                if installed:
+                    _remove_path(target)
+                if backup is not None:
+                    os.replace(backup, target)
+            except OSError as rollback_exc:
+                rollback_error = rollback_exc
+        if rollback_error is not None:
+            recovery_root = rollback_root.parent
+            raise RestoreRecoveryFailure(
+                "restore destination rollback failed; recovery data is preserved at "
+                f"{recovery_root}; restore files from its rollback directory before retrying"
+            ) from rollback_error
+        raise
+
+
+@contextmanager
+def _restore_transaction(restore_root: Path) -> Iterator[Path]:
+    transaction_root = Path(
+        tempfile.mkdtemp(prefix=".ansible-deploy-restore-", dir=restore_root)
+    )
+    try:
+        yield transaction_root
+    except RestoreRecoveryFailure:
+        raise
+    except BaseException:
+        shutil.rmtree(transaction_root, ignore_errors=True)
+        raise
+    else:
+        shutil.rmtree(transaction_root)
 
 
 def _member_destination(
@@ -738,7 +809,20 @@ def restore(config: dict[str, Any], identifier: str) -> dict[str, Any]:
         ):
             raise BackupFailure("backup checksum verification failed")
         run(["age", "-d", "-i", config["age_identity"], "-o", str(archive_path), str(encrypted)])
-        with tarfile.open(archive_path, "r:gz") as archive:
+        restore_root = Path(config["restore_root"])
+        restore_root = _safe_destination(
+            restore_root.parent, PurePosixPath(restore_root.name)
+        )
+        restore_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (
+            _restore_transaction(restore_root) as transaction_root,
+            tarfile.open(archive_path, "r:gz") as archive,
+        ):
+            staged_root = transaction_root / "payload"
+            rollback_root = transaction_root / "rollback"
+            staged_root.mkdir(mode=0o700)
+            rollback_root.mkdir(mode=0o700)
+            staged_config = {**config, "restore_root": str(staged_root)}
             members = safe_members(archive)
             source_map = _load_source_map(archive, members)
             _validate_mapped_members(members, source_map)
@@ -748,13 +832,13 @@ def restore(config: dict[str, Any], identifier: str) -> dict[str, Any]:
                 path = PurePosixPath(member.name)
                 if path.parts[0] != "files":
                     continue
-                source = source_map.get(path.parts[1]) if len(path.parts) > 1 else None
-                if source is None:
+                file_source = source_map.get(path.parts[1]) if len(path.parts) > 1 else None
+                if file_source is None:
                     raise BackupFailure("archive file source identifier is unknown")
-                if source["type"] == "postgres":
+                if file_source["type"] == "postgres":
                     raise BackupFailure("archive file source mapping is invalid")
-                restored_sources.add(source["id"])
-                target = _member_destination(config, source, member)
+                restored_sources.add(file_source["id"])
+                target = _member_destination(staged_config, file_source, member)
                 if member.isdir():
                     target.mkdir(mode=0o700, parents=True, exist_ok=True)
                     directories.append((target, member))
@@ -772,13 +856,18 @@ def restore(config: dict[str, Any], identifier: str) -> dict[str, Any]:
                 if len(path.parts) != 2 or not path.name.endswith(".sql"):
                     raise BackupFailure("archive database member has an invalid mapping")
                 source_id = path.name[:-4]
-                source = source_map.get(source_id)
-                if source is None or source["type"] != "postgres" or source_id in dumps:
+                database_source = source_map.get(source_id)
+                if (
+                    database_source is None
+                    or database_source["type"] != "postgres"
+                    or source_id in dumps
+                ):
                     raise BackupFailure("archive database source mapping is invalid")
                 dumps[source_id] = member
             expected_sources = set(source_map)
             if restored_sources | set(dumps) != expected_sources:
                 raise BackupFailure("archive contents do not match authenticated source mapping")
+            dump_paths: dict[str, Path] = {}
             for source_id, member in dumps.items():
                 source_config = source_map[source_id]
                 dump = workspace / Path(member.name).name
@@ -788,6 +877,12 @@ def restore(config: dict[str, Any], identifier: str) -> dict[str, Any]:
                 with dump.open("wb") as output:
                     shutil.copyfileobj(extracted, output)
                 _wait_for_postgres(config, source_config)
+                dump_paths[source_id] = dump
+            _replace_restore_destinations(
+                config, source_map, staged_root, rollback_root
+            )
+            for source_id, dump in dump_paths.items():
+                source_config = source_map[source_id]
                 run([
                     "docker", "compose", "-f", config["compose_file"], "exec", "-T",
                     source_config["service"], "psql", "-v", "ON_ERROR_STOP=1", "-U",

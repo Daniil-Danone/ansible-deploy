@@ -444,8 +444,17 @@ def validate_observability_inputs(config: EnvironmentConfig | MonitoringConfig) 
         ) from None
 
 
-def validate_backup_inputs(config: EnvironmentConfig, *, require_identity: bool = False) -> None:
-    if config.environment != "prod" or config.backup is None or not config.backup.enabled:
+def validate_backup_inputs(
+    config: EnvironmentConfig,
+    *,
+    require_identity: bool = False,
+    allow_disabled: bool = False,
+) -> None:
+    if config.environment != "prod" or config.backup is None:
+        raise ConfigurationError("Production backup is not enabled")
+    if not config.backup.enabled:
+        if allow_disabled:
+            return
         raise ConfigurationError("Production backup is not enabled")
     required = [("backup credentials", config.backup.credentials_file)]
     if require_identity:

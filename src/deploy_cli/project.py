@@ -14,10 +14,11 @@ import yaml
 
 from .secret_store import create_project_id, load_project_id
 
-SCAFFOLD_VERSION = 3
+SCAFFOLD_VERSION = 4
 STATE_PATH = Path(".deploy/template-state.yml")
 CD_PATH = Path(".deploy/cd.yml")
 WORKFLOW_PATH = Path(".github/workflows/deploy.yml")
+CI_WORKFLOW_PATH = Path(".github/workflows/ci.yml")
 
 
 class ProjectError(RuntimeError):
@@ -123,15 +124,19 @@ def _cd_templates(
     else:
         result[CD_PATH] = yaml.safe_dump(settings, sort_keys=False).encode()
     workflow = result[WORKFLOW_PATH].decode("utf-8")
+    ci_workflow = result[CI_WORKFLOW_PATH].decode("utf-8")
     replacements = {
         "__STAGE_BRANCH_YAML__": json.dumps(stage),
+        "__PRODUCTION_BRANCH_YAML__": json.dumps(production),
         "__STAGE_REF_EXPRESSION__": "'refs/heads/" + stage.replace("'", "''") + "'",
         "__PRODUCTION_REF_EXPRESSION__": "'refs/heads/" + production.replace("'", "''") + "'",
         "__TOOL_SHA__": sha,
     }
     for placeholder, value in replacements.items():
         workflow = workflow.replace(placeholder, value)
+        ci_workflow = ci_workflow.replace(placeholder, value)
     result[WORKFLOW_PATH] = workflow.encode()
+    result[CI_WORKFLOW_PATH] = ci_workflow.encode()
     return result
 
 

@@ -2,7 +2,8 @@
 
 Репозиторий CLI предоставляет reusable contract
 `.github/workflows/reusable-deploy.yml`. `project init` создаёт в application repository
-управляемый caller `.github/workflows/deploy.yml` и настройки `.deploy/cd.yml`:
+управляемые workflows `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`,
+version-controlled entrypoint `.deploy/ci.sh` и настройки `.deploy/cd.yml`:
 
 ```bash
 ansible-deploy project init --stage-branch develop --production-branch main --tool-sha FULL_40_CHARACTER_SHA
@@ -17,9 +18,14 @@ ansible-deploy project init --stage-branch develop --production-branch main --to
 его обязательно заменяют в `.deploy/cd.yml` на проверенный полный commit SHA через sync.
 GitHub не запускает reusable workflow с несуществующим placeholder ref.
 
-`.github/examples/application-deploy.yml` показывает вариант с Python quality checks.
-Сгенерированный caller использует repository variable `QUALITY_COMMAND` для команд
-проверки конкретного приложения; если она пуста, дополнительные проверки пропускаются.
+Сразу после init `.deploy/ci.sh` содержит fail-closed placeholder: CI намеренно красный,
+пока команда проекта не заменит его реальными non-interactive lint/type/test командами.
+И отдельный CI во вкладке Actions, и delivery quality job запускают один и тот же
+закоммиченный entrypoint. Поэтому настройки нельзя случайно потерять в GitHub Variables,
+а deploy не продолжится с пустой проверкой. `.github/examples/application-deploy.yml`
+показывает вариант с Python quality checks. Оба managed workflow перед проверками
+устанавливают воспроизводимый базовый toolchain: Temurin JDK 21 и Node.js 22; cache
+на уровне setup action не включён, поэтому scaffold не требует lockfile в корне проекта.
 
 ## Границы pipeline
 
@@ -42,7 +48,7 @@ Production job привязан к GitHub Environment `production`. Именно
 3. В `build` создайте secrets `REGISTRY_USERNAME` и `REGISTRY_TOKEN` с минимальными
    правами на push только в application image repositories. Задайте repository variables
    `REGISTRY_PREFIX` (например, `ghcr.io/owner`), `REGISTRY_HOST` (по умолчанию `ghcr.io`),
-   `STAGE_HEALTH_URL`, `PRODUCTION_HEALTH_URL` и `QUALITY_COMMAND`. Имена repositories
+   `STAGE_HEALTH_URL` и `PRODUCTION_HEALTH_URL`. Имена repositories
    берутся из `image` каждого service в `.deploy/images.yml`.
 4. Установите GitHub CLI (`gh`), выполните `gh auth login --hostname github.com`
    и из application project
@@ -68,7 +74,8 @@ Production job привязан к GitHub Environment `production`. Именно
    GitHub требует наличия workflow в default branch для кнопки ручного запуска:
    сначала добавьте scaffold в default branch, затем выбирайте Production-ветку в Run workflow.
 8. Заполните **все** собираемые services в `.deploy/images.yml`, замените health URLs и
-   `QUALITY_COMMAND` приложения. `deploy project sync` должен установить управляемый
+   fail-closed placeholder в `.deploy/ci.sh` реальными проверками приложения. Закоммитьте
+   этот файл вместе с workflow. `deploy project sync` должен установить управляемый
    helper `.deploy/ci_image_contract.py`; не копируйте его вручную из случайной версии.
 9. Защитите выбранные Stage/Production-ветки: required quality check, review и запрет
    прямого push. В Environment `production` ограничьте deployment branches выбранной

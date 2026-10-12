@@ -580,6 +580,7 @@ def _backup_variables(source: EnvironmentConfig, target: EnvironmentConfig) -> d
         raise RunnerError("Production backup is not configured", 8)
     return {
         "app_environment": target.environment,
+        "backup_enabled": backup.enabled,
         "backup_schedule": backup.schedule,
         "backup_id": "",
         "backup_runtime_config": {
@@ -589,7 +590,11 @@ def _backup_variables(source: EnvironmentConfig, target: EnvironmentConfig) -> d
             # Destinations remain relative here. Each backup records an immutable,
             # encrypted source map and resolves it below the selected Restore root.
             "include": [item.model_dump(mode="json") for item in backup.include],
-            "rclone_config": "/etc/ansible-deploy/backup/rclone.conf",
+            "rclone_config": (
+                "/run/ansible-deploy-rclone.conf"
+                if target.environment == "restore"
+                else "/etc/ansible-deploy/backup/rclone.conf"
+            ),
             "remote": backup.remote,
             "restore_root": target.application.remote_dir,
             "result_file": "/var/lib/ansible-deploy/backup/last-result.json",
@@ -628,7 +633,7 @@ def backup_operation(
         config.server.ssh_key,
         backup_credentials_file=(
             config.backup.credentials_file
-            if config.backup is not None
+            if config.backup is not None and (action != "setup" or config.backup.enabled)
             else None
         ),
         exit_code=8,

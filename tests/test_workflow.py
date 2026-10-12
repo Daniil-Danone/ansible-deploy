@@ -275,6 +275,34 @@ def test_backup_operations_converge_runtime_and_credentials(
     assert backup_call.args[2]["backup_action"] == action
 
 
+def test_disabled_backup_setup_does_not_mount_credentials(tmp_path: Path) -> None:
+    repo = Path(__file__).parents[1] / "examples/demo-app"
+    global_config, config = load_configuration(repo, "prod")
+    config.backup = BackupConfig.model_validate(
+        {
+            "enabled": False,
+            "remote": "drive:backups",
+            "credentials_file": str(tmp_path / "missing-rclone.conf"),
+            "age_identity_file": str(tmp_path / "missing-age.key"),
+            "age_recipient": "age1" + "a" * 58,
+            "include": [
+                {
+                    "type": "file",
+                    "path": "/srv/myapp-prod/data",
+                    "restore_destination": "data",
+                }
+            ],
+        }
+    )
+    runner = Mock()
+
+    backup_operation(repo, global_config, config, runner, action="setup")
+
+    backup_call = runner.playbook.call_args_list[-1]
+    assert backup_call.args[2]["backup_enabled"] is False
+    assert backup_call.kwargs["backup_credentials_file"] is None
+
+
 def test_production_uses_separate_compose_project_name(tmp_path: Path) -> None:
     repo = Path(__file__).parents[1] / "examples/demo-app"
     global_config, config = load_configuration(repo, "prod")

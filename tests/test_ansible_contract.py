@@ -403,9 +403,48 @@ def test_observability_playbooks_are_separate_from_application_release_flow() ->
 
 def test_backup_every_operation_converges_runtime_config_and_credentials() -> None:
     tasks = _text("ansible/roles/backup/tasks/main.yml")
-    converge_guard = "backup_action in ['setup', 'run', 'list', 'restore']"
 
-    assert tasks.count(converge_guard) >= 4
+    enabled_setup_guard = (
+        "backup_action in ['run', 'list', 'restore'] or "
+        "(backup_action == 'setup' and backup_enabled)"
+    )
+    assert tasks.count(enabled_setup_guard) >= 3
+    assert "backup_action in ['run', 'list'] or " in tasks
+
+
+def test_disabled_backup_setup_stops_timer_without_removing_configuration() -> None:
+    tasks = _yaml("ansible/roles/backup/tasks/main.yml")
+    names = [str(task.get("name")) for task in tasks]
+    disable = tasks[names.index("Disable scheduled backup timer")]
+
+    assert disable["ansible.builtin.systemd_service"]["enabled"] is False  # type: ignore[index]
+    assert disable["ansible.builtin.systemd_service"]["state"] == "stopped"  # type: ignore[index]
+    assert all(
+        task.get("ansible.builtin.file", {}).get("state") != "absent"  # type: ignore[union-attr]
+        for task in tasks
+        if "rclone.conf" in str(task)
+    )
+
+
+def test_restore_rclone_configuration_is_ephemeral() -> None:
+    tasks = _yaml("ansible/roles/backup/tasks/main.yml")
+    names = [str(task.get("name")) for task in tasks]
+    restore = tasks[names.index("Restore encrypted backup with ephemeral identity")]
+    stage = next(
+        task for task in restore["block"]
+        if task.get("name") == "Stage rclone configuration in tmpfs"
+    )
+    remove = next(
+        task for task in restore["always"]
+        if task.get("name") == "Remove ephemeral rclone configuration"
+    )
+
+    assert stage["ansible.builtin.copy"]["dest"] == "/run/ansible-deploy-rclone.conf"  # type: ignore[index]
+    assert stage["no_log"] is True
+    assert remove["ansible.builtin.file"] == {  # type: ignore[comparison-overlap]
+        "path": "/run/ansible-deploy-rclone.conf",
+        "state": "absent",
+    }
 
 
 def test_restore_application_preflights_compose_and_preserves_original_failure() -> None:

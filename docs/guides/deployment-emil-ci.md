@@ -21,12 +21,12 @@
 
 ## 1. Что создаёт ansible-deploy
 
-Нужен `ansible-deploy v0.5.6` или новее. После публикации релиза обновить CLI и
+Нужен `ansible-deploy v0.5.7` или новее. После публикации релиза обновить CLI и
 проверить версию:
 
 ```bash
 uv tool install --force \
-  'git+https://github.com/Daniil-Danone/ansible-deploy.git@v0.5.6'
+  'git+https://github.com/Daniil-Danone/ansible-deploy.git@v0.5.7'
 ansible-deploy --version
 ```
 
